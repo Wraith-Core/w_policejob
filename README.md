@@ -1,0 +1,44 @@
+# w_policejob
+
+Law enforcement job for the Wraith Core (RedM) server.
+
+## Dependencies
+- w_lib (library: prompts, language, dialogs, blips, notifications, entities)
+- w_core (framework: players, jobs, commands)
+- w_inventory (stashes, armory, evidence items)
+
+## Language
+The library controls the language: `setr w_lib:locale "ar"` in server.cfg and the player's own
+choice in the `/w_lib` dialog. The dictionaries live in `locales/ar.json` and `locales/en.json`
+(same key set in both). Prompt labels, blip names and menus are rebuilt live when the player
+switches language. Server-side notices are sent as dictionary keys and translated on the client.
+
+## Features
+- On duty / off duty, personal stash, armory and evidence drawers at every sheriff office
+- Wagon garage per job grade (RDR2 wagons, e.g. the police wagon)
+- Bullet casings (firearms only), blood drops, fingerprints and a status list (gunpowder, alcohol, ...);
+  evidence shows up while the lawman holds his lantern and is collected through the library prompt (Config.Keys.collect)
+- A library prompt card follows the closest player: an on-duty lawman gets search, cuff/uncuff (held), escort,
+  seat in / take out of a wagon, jail (held), fine, seize cash (held) and check condition; everybody else gets
+  rob (held, hands up), escort and carry for a cuffed or downed person. Keys live in Config.Keys.
+  Doctors keep their own patient card (w_ambulancejob) and use /escort instead
+- One card at a time: station cards, evidence cards and the player card are arbitrated by
+  client/cards.lua (station > evidence > player, then the closest), and every card steps aside
+  while a menu, dialog, progress bar or the inventory is open
+- Handcuffs (item or command): a hard cuff pins the suspect, a soft cuff (/sc) lets him walk; escort, search,
+  seize cash, jail and fines; cuffed suspects can be seated in a wagon
+- Placeable objects (wooden barricade, tent, torch post, lantern)
+- Lawmen see each other on the map; alerts drop a pulsing blip
+
+## Commands
+- /pobject [barricade/tent/torch/lantern/delete] - places or removes an object
+- /cuff - cuffs/uncuffs the nearby player
+- /sc - soft cuff
+- /escort - escorts the nearby player
+- /callsign [text] - sets your callsign
+- /clearcasings - clears nearby bullet casings
+- /clearblood - clears nearby blood drops
+- /jail [id] [months] - sends a player to jail
+- /unjail [id] - releases a player
+- /seizecash - seizes the nearby player's cash into a money bag
+- /takedna [id] - takes a DNA sample (empty evidence bag needed)
