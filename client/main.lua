@@ -69,9 +69,9 @@ end
 
 -- Events
 AddEventHandler('WCore:Client:OnPlayerLoaded', function()
-    local player = WCore.Functions.GetPlayerData()
-    PlayerJob = player.job
-    onDuty = player.job.onduty
+    local player = WCore.Functions.GetPlayerData() or {}
+    PlayerJob = player.job or {}
+    onDuty = PlayerJob.onduty or false
     SetHandcuffed(false)
     SetEscorted(false)
     TriggerServerEvent("WCore:Server:SetMetaData", "ishandcuffed", false)
