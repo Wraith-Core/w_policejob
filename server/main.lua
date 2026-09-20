@@ -1,3 +1,16 @@
+local function economyReady()
+    return GetResourceState('w_centralbank') == 'started' and exports.w_centralbank:IsReady()
+end
+local function closePlayers(a, b)
+    if not a or not b then return false end
+    local x, y = a.PlayerData.source, b.PlayerData.source
+    local px, py = GetPlayerPed(x), GetPlayerPed(y)
+    return px ~= 0 and py ~= 0 and GetPlayerRoutingBucket(x) == GetPlayerRoutingBucket(y)
+        and #(GetEntityCoords(px) - GetEntityCoords(py)) <= 5.0
+end
+local function cashAccount(player)
+    return 'player:' .. player.PlayerData.citizenid .. ':cash'
+end
 -- Variables
 local PlayerStatus = {}
 local Casings = {}
@@ -236,16 +249,18 @@ WCore.Functions.CreateUseableItem("handcuffs", function(source, item)
 end)
 
 WCore.Functions.CreateUseableItem("moneybag", function(source, item)
-    local src = source
-    local Player = WCore.Functions.GetPlayer(src)
-    if Player.Functions.GetItemByName(item.name) then
-        if item.info and item.info ~= "" then
-            if Player.PlayerData.job.name ~= "police" then
-                if Player.Functions.RemoveItem("moneybag", 1, item.slot) then
-                    Player.Functions.AddMoney("cash", tonumber(item.info.cash), "used-moneybag")
-                end
-            end
-        end
+    local player = WCore.Functions.GetPlayer(source)
+    if not player or not economyReady() then return end
+    local bag = player.Functions.GetItemBySlot(item.slot)
+    local info = bag and bag.info
+    -- Legacy or administrator-created cash metadata is not a redeemable banknote.
+    local id = type(info) == 'table' and info.economyClaim
+    if not bag or bag.name ~= 'moneybag' or type(id) ~= 'string' or not id:match('^moneybag:%x+:cash$') then return end
+    local amount = exports.w_centralbank:GetBalance(id)
+    if not amount or amount <= 0 then return end
+    if not player.Functions.RemoveItem('moneybag', 1, item.slot) then return end
+    if not exports.w_centralbank:Transfer(id, cashAccount(player), amount, 'moneybag-redeemed', 'redeem:' .. id) then
+        player.Functions.AddItem('moneybag', 1, item.slot, info)
     end
 end)
 
@@ -413,8 +428,10 @@ RegisterNetEvent('police:server:BillPlayer', function(playerId, price)
     local OtherPlayer = WCore.Functions.GetPlayer(playerId)
     if Player.PlayerData.job.name == "police" then
         if OtherPlayer then
-            OtherPlayer.Functions.RemoveMoney("bank", price, "paid-bills")
-            TriggerEvent('w_bossmenu:server:addAccountMoney', "police", price)
+            price = tonumber(price)
+            if not closePlayers(Player, OtherPlayer) or not price or price ~= price or price <= 0 or price == math.huge or not economyReady() then return end
+            if not exports.w_centralbank:EnsureAccount('society:police', 'police', 'society') then return end
+            if not exports.w_centralbank:Transfer('player:' .. OtherPlayer.PlayerData.citizenid .. ':bank', 'society:police', price, 'police-bill') then return end
             TriggerClientEvent('police:client:notify', OtherPlayer.PlayerData.source, 'info.fine_received', 'inform', price)
         end
     end
@@ -460,29 +477,33 @@ RegisterNetEvent('police:server:SearchPlayer', function(playerId)
 end)
 
 RegisterNetEvent('police:server:SeizeCash', function(playerId)
-    local src = source
-    local Player = WCore.Functions.GetPlayer(src)
-    local SearchedPlayer = WCore.Functions.GetPlayer(playerId)
-    if SearchedPlayer then
-        local moneyAmount = SearchedPlayer.PlayerData.money["cash"]
-        local info = { cash = moneyAmount }
-        SearchedPlayer.Functions.RemoveMoney("cash", moneyAmount, "police-cash-seized")
-        Player.Functions.AddItem("moneybag", 1, false, info)
-        w.notify(SearchedPlayer.PlayerData.source, { description = 'info.cash_confiscated', type = 'inform' })
+    local officer = WCore.Functions.GetPlayer(source)
+    local victim = WCore.Functions.GetPlayer(tonumber(playerId))
+    if not closePlayers(officer, victim) or officer.PlayerData.citizenid == victim.PlayerData.citizenid or officer.PlayerData.job.name ~= 'police'
+        or not officer.PlayerData.job.onduty or not economyReady() then return end
+    local amount = exports.w_centralbank:GetBalance(cashAccount(victim))
+    if not amount or amount <= 0 then return end
+    local token = ('%08x%08x%08x%08x'):format(math.random(0,0x7fffffff),math.random(0,0x7fffffff),math.random(0,0x7fffffff),math.random(0,0x7fffffff))
+    local claim = 'moneybag:' .. token .. ':cash'
+    if not exports.w_centralbank:EnsureAccount(claim, officer.PlayerData.citizenid, 'bearer-cash') then return end
+    if not exports.w_centralbank:Transfer(cashAccount(victim), claim, amount, 'police-cash-seized') then return end
+    if not officer.Functions.AddItem('moneybag', 1, false, {cash=amount, economyClaim=claim}) then
+        exports.w_centralbank:Transfer(claim, cashAccount(victim), amount, 'seizure-cancelled')
+        return
     end
+    w.notify(victim.PlayerData.source, {description='info.cash_confiscated', type='inform'})
 end)
 
 RegisterNetEvent('police:server:RobPlayer', function(playerId)
-    local src = source
-    local Player = WCore.Functions.GetPlayer(src)
-    local SearchedPlayer = WCore.Functions.GetPlayer(playerId)
-    if SearchedPlayer then
-        local money = SearchedPlayer.PlayerData.money["cash"]
-        Player.Functions.AddMoney("cash", money, "police-player-robbed")
-        SearchedPlayer.Functions.RemoveMoney("cash", money, "police-player-robbed")
-        TriggerClientEvent('police:client:notify', SearchedPlayer.PlayerData.source, 'info.cash_robbed', 'inform', money)
-        TriggerClientEvent('police:client:notify', Player.PlayerData.source, 'info.stolen_money', 'inform', money)
-    end
+    local robber = WCore.Functions.GetPlayer(source)
+    local victim = WCore.Functions.GetPlayer(tonumber(playerId))
+    if not closePlayers(robber, victim) or robber.PlayerData.citizenid == victim.PlayerData.citizenid or not economyReady() then return end
+    local state = victim.PlayerData.metadata or {}
+    if not state.ishandcuffed and not state.isdead and not state.inlaststand then return end
+    local amount = exports.w_centralbank:GetBalance(cashAccount(victim))
+    if not amount or amount <= 0 or not exports.w_centralbank:Transfer(cashAccount(victim), cashAccount(robber), amount, 'player-robbery') then return end
+    TriggerClientEvent('police:client:notify', victim.PlayerData.source, 'info.cash_robbed', 'inform', amount)
+    TriggerClientEvent('police:client:notify', robber.PlayerData.source, 'info.stolen_money', 'inform', amount)
 end)
 
 RegisterNetEvent('police:server:spawnObject', function(type)
