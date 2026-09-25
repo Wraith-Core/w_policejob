@@ -13,7 +13,8 @@
     "not_lawman": "You are not a lawman",
     "law_only": "Law enforcement only",
     "have_evidence_bag": "You must have an empty evidence bag with you",
-    "not_cuffed_dead": "Civilian isn't cuffed or dead"
+    "not_cuffed_dead": "Civilian isn't cuffed or dead",
+    "record_failed": "Could not update the record of %s"
   },
   "success": {
     "uncuffed": "You have been uncuffed",
@@ -23,7 +24,7 @@
   "info": {
     "callsign_name": "Name of your callsign",
     "poobject_object": "Object type (barricade, tent, torch, lantern) or 'delete' to remove",
-    "player_id": "ID of player",
+    "player_id": "Citizen ID (#5 = server ID 5)",
     "dna_sample": "DNA sample",
     "jail_time": "Time they have to be in jail",
     "jail_time_no": "Jail time needs to be higher than 0",
@@ -35,6 +36,9 @@
     "being_searched": "You are being searched",
     "cash_found": "Found $%s on the civilian",
     "sent_jail_for": "You sent the person to prison for %s months",
+    "jailed_offline": "%s is offline: a %s month sentence is on his record",
+    "unjailed": "%s was released",
+    "unjailed_offline": "%s is offline: his sentence was cleared",
     "fine_received": "You received a fine of $%s",
     "blip_text": "Law alert - %s",
     "jail_time_input": "Jail time",

@@ -27,6 +27,14 @@ switches language. Server-side notices are sent as dictionary keys and translate
   while a menu, dialog, progress bar or the inventory is open
 - Handcuffs (item or command): a hard cuff pins the suspect, a soft cuff (/sc) lets him walk; escort, search,
   seize cash, jail and fines; cuffed suspects can be seated in a wagon
+- The server checks every action on a nearby player (cuff, escort, carry, wagon in/out, search, jail, fine,
+  seize cash, rob) itself: the man is in the game and is not the sender, both are in the same routing bucket
+  and within 5 m (8 m to take him out of a wagon, measured at the wagon too), the sender has the job on duty
+  or the handcuffs the action needs (search and wagons: lawman on duty; a hard cuff: the handcuffs), and the
+  man is cuffed or down where the action needs it. A modified client cannot act on a player across the map
+- The cuff flag those checks read is the server's: a suspect's client only confirms the cuff or uncuff the
+  server just sent him (10 s), or drops the cuffs of a dead man at the hospital; loading, logging out and
+  the jail clear it on the server. A client can no longer cuff or uncuff itself
 - Placeable objects (wooden barricade, tent, torch post, lantern)
 - Lawmen see each other on the map; alerts drop a pulsing blip
 

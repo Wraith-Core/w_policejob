@@ -74,7 +74,8 @@ AddEventHandler('WCore:Client:OnPlayerLoaded', function()
     onDuty = PlayerJob.onduty or false
     SetHandcuffed(false)
     SetEscorted(false)
-    TriggerServerEvent("WCore:Server:SetMetaData", "ishandcuffed", false)
+    -- the server clears its own cuff flag when the character loads (server/main.lua); w_core no
+    -- longer takes a client's word on it (WCore:Server:SetMetaData), and this report is a no-op
     TriggerServerEvent("police:server:SetHandcuffStatus", false)
     TriggerServerEvent("police:server:UpdateCurrentCops")
 

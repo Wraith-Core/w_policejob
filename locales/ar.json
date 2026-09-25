@@ -13,7 +13,8 @@
     "not_lawman": "أنت لست من رجال القانون",
     "law_only": "لرجال القانون فقط",
     "have_evidence_bag": "يجب أن تحمل حقيبة أدلة فارغة معك",
-    "not_cuffed_dead": "المواطن ليس مكبّلًا ولا ميتًا"
+    "not_cuffed_dead": "المواطن ليس مكبّلًا ولا ميتًا",
+    "record_failed": "تعذّر تعديل سجل %s"
   },
   "success": {
     "uncuffed": "تم فك قيودك",
@@ -23,7 +24,7 @@
   "info": {
     "callsign_name": "اسم إشارة النداء الخاصة بك",
     "poobject_object": "نوع الغرض (barricade, tent, torch, lantern) أو delete لإزالته",
-    "player_id": "معرّف اللاعب",
+    "player_id": "رقم المواطن (#5 = رقم السيرفر 5)",
     "dna_sample": "عينة حمض نووي",
     "jail_time": "مدة بقائه في السجن",
     "jail_time_no": "يجب أن تكون مدة السجن أكبر من 0",
@@ -35,6 +36,9 @@
     "being_searched": "يجري تفتيشك",
     "cash_found": "عُثر على $%s بحوزة المواطن",
     "sent_jail_for": "أرسلت الشخص إلى السجن لمدة %s شهرًا",
+    "jailed_offline": "%s غير متصل: سُجّل عليه حكم بالسجن %s شهرًا",
+    "unjailed": "أُفرج عن %s",
+    "unjailed_offline": "%s غير متصل: أُلغي حكمه",
     "fine_received": "تلقيت غرامة قدرها $%s",
     "blip_text": "بلاغ لرجال القانون - %s",
     "jail_time_input": "مدة السجن",

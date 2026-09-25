@@ -112,6 +112,62 @@ local function DnaHash(s)
     return h
 end
 
+-- ── the citizen id ───────────────────────────────────────────────────────────
+-- /jail, /unjail and /takedna name the suspect by his citizen id (players.citizenid: '12', a
+-- vanity '777', an old 'OMG95204'), the one id that never changes; '#5' still means server id 5
+-- on purpose. A server id changes on every connection and, since the citizen id is plain digits,
+-- the two collided: "/jail 12 5" jailed whoever held server id 12, or nobody. w.citizen says who
+-- the id is and whether he is in the game (then his server id comes with the answer).
+
+--- Tell the officer why the id names nobody he can act on; `offline` (a target) names the man.
+---@param src integer
+---@param reason string|nil 'invalid_id' | 'not_found' | 'offline'
+---@param offline table|nil
+local function refuseTarget(src, reason, offline)
+    local text = w.citizen.reasonText(reason, src)
+    if offline then text = ('%s: %s'):format(w.citizen.label(offline), text) end
+    w.notify(src, { description = text, type = 'error' })
+end
+
+--- The record a sentence leaves on the file (the day is kept below 31 as it always was).
+local function jailRecord()
+    local currentDate = os.date("*t")
+    if currentDate.day == 31 then
+        currentDate.day = 30
+    end
+    return { ["hasRecord"] = true, ["date"] = currentDate }
+end
+
+--- A character who is not in the game: w_core's own offline player (his saved row), the same
+--- SetMetaData as in play, then saved, so what is set here is on his file when he logs in.
+---@param citizenid string
+---@param values table<string, any>
+---@return boolean
+local function setOfflineMetadata(citizenid, values)
+    local ok, player = pcall(function() return WCore.Functions.GetOfflinePlayerByCitizenId(citizenid) end)
+    if not ok or type(player) ~= 'table' or type(player.Functions) ~= 'table' then return false end
+    -- the Functions are funcrefs into w_core: a failed call is a "could not" for the officer, not
+    -- an error that leaves him with no answer
+    return (pcall(function()
+        for key, value in pairs(values) do player.Functions.SetMetaData(key, value) end
+        player.Functions.Save()
+    end))
+end
+
+--- Jail a character in play: the sentence and the record on his file, then his client drops the
+--- cuffs and escort and enters the prison.
+---@param src integer the officer
+---@param OtherPlayer table the suspect's core player
+---@param time number months
+local function jailInPlay(src, OtherPlayer, time)
+    OtherPlayer.Functions.SetMetaData("injail", time)
+    OtherPlayer.Functions.SetMetaData("criminalrecord", jailRecord())
+    -- his client drops the cuffs on SendToJail; the server clears its own flag (see SetHandcuffStatus)
+    OtherPlayer.Functions.SetMetaData("ishandcuffed", false)
+    TriggerClientEvent("police:client:SendToJail", OtherPlayer.PlayerData.source, time)
+    TriggerClientEvent('police:client:notify', src, 'info.sent_jail_for', 'inform', time)
+end
+
 -- Commands
 WCore.Commands.Add("pobject", locale("commands.place_object"), {{name = "type",help = locale("info.poobject_object")}}, true, function(source, args)
     local src = source
@@ -164,16 +220,30 @@ WCore.Commands.Add("clearcasings", locale("commands.clear_casign"), {}, false, f
     end
 end)
 
+-- The command resolves the id here and jails directly. It used to bounce the number through the
+-- officer's client (police:client:JailCommand -> police:server:JailPlayer), which is now the
+-- walk-up card's event only and checks that the suspect stands next to the officer.
 WCore.Commands.Add("jail", locale("commands.jail_player"), {{name = "id", help = locale('info.player_id')}, {name = "time", help = locale('info.jail_time')}}, true, function(source, args)
     local src = source
     local Player = WCore.Functions.GetPlayer(src)
-    if Player.PlayerData.job.name == "police" and Player.PlayerData.job.onduty then
-        local playerId = tonumber(args[1])
+    if Player and Player.PlayerData.job.name == "police" and Player.PlayerData.job.onduty then
         local time = tonumber(args[2])
-        if time and time > 0 then
-            TriggerClientEvent("police:client:JailCommand", src, playerId, time)
+        if not time or time ~= time or time <= 0 or time == math.huge then
+            return w.notify(src, { description = 'info.jail_time_no', type = 'inform' })
+        end
+        local target, reason = w.citizen.resolve(args[1], { self = src })
+        if not target then return refuseTarget(src, reason) end
+        if target.online then
+            local OtherPlayer = WCore.Functions.GetPlayer(target.source)
+            if not OtherPlayer then return refuseTarget(src, 'not_found') end
+            return jailInPlay(src, OtherPlayer, time)
+        end
+        -- not in the game: the sentence and the record go on his file now, the same metadata a
+        -- jail in play sets (what the MDT and a prison script read)
+        if setOfflineMetadata(target.citizenid, { injail = time, criminalrecord = jailRecord() }) then
+            TriggerClientEvent('police:client:notify', src, 'info.jailed_offline', 'inform', w.citizen.label(target), time)
         else
-            w.notify(src, { description = 'info.jail_time_no', type = 'inform' })
+            TriggerClientEvent('police:client:notify', src, 'error.record_failed', 'error', w.citizen.label(target))
         end
     else
         w.notify(src, { description = 'error.on_duty_police_only', type = 'error' })
@@ -183,9 +253,22 @@ end)
 WCore.Commands.Add("unjail", locale("commands.unjail_player"), {{name = "id", help = locale('info.player_id')}}, true, function(source, args)
     local src = source
     local Player = WCore.Functions.GetPlayer(src)
-    if Player.PlayerData.job.name == "police" and Player.PlayerData.job.onduty then
-        local playerId = tonumber(args[1])
-        TriggerClientEvent("prison:client:UnjailPerson", playerId)
+    if Player and Player.PlayerData.job.name == "police" and Player.PlayerData.job.onduty then
+        local target, reason = w.citizen.resolve(args[1], { self = src })
+        if not target then return refuseTarget(src, reason) end
+        if target.online then
+            local OtherPlayer = WCore.Functions.GetPlayer(target.source)
+            if not OtherPlayer then return refuseTarget(src, 'not_found') end
+            -- the sentence is cleared here: the client event only reaches a prison script, when
+            -- one runs, and it used to be the whole release (fired at an unchecked number)
+            OtherPlayer.Functions.SetMetaData("injail", 0)
+            TriggerClientEvent("prison:client:UnjailPerson", target.source)
+            TriggerClientEvent('police:client:notify', src, 'info.unjailed', 'success', w.citizen.label(target))
+        elseif setOfflineMetadata(target.citizenid, { injail = 0 }) then
+            TriggerClientEvent('police:client:notify', src, 'info.unjailed_offline', 'success', w.citizen.label(target))
+        else
+            TriggerClientEvent('police:client:notify', src, 'error.record_failed', 'error', w.citizen.label(target))
+        end
     else
         w.notify(src, { description = 'error.on_duty_police_only', type = 'error' })
     end
@@ -224,18 +307,23 @@ end)
 WCore.Commands.Add("takedna", locale("commands.takedna"), {{name = "id", help = locale('info.player_id')}}, true, function(source, args)
     local src = source
     local Player = WCore.Functions.GetPlayer(src)
-    local OtherPlayer = WCore.Functions.GetPlayer(tonumber(args[1]))
-    if ((Player.PlayerData.job.name == "police") and Player.PlayerData.job.onduty) and OtherPlayer then
-        if Player.Functions.RemoveItem("satchel", 1) then
-            local info = {
-                label = locale('info.dna_sample'),
-                type = "dna",
-                dnalabel = DnaHash(OtherPlayer.PlayerData.citizenid)
-            }
-            Player.Functions.AddItem("evidence_satchel", 1, false, info)
-        else
-            w.notify(src, { description = 'error.have_evidence_bag', type = 'error' })
-        end
+    if not Player or Player.PlayerData.job.name ~= "police" or not Player.PlayerData.job.onduty then
+        return w.notify(src, { description = 'error.on_duty_police_only', type = 'error' })
+    end
+    -- a sample is taken from a man who is there: an offline character is refused by name
+    local target, reason, offline = w.citizen.requireOnline(args[1], { self = src })
+    if not target then return refuseTarget(src, reason, offline) end
+    local OtherPlayer = WCore.Functions.GetPlayer(target.source)
+    if not OtherPlayer then return refuseTarget(src, 'not_found') end
+    if Player.Functions.RemoveItem("satchel", 1) then
+        local info = {
+            label = locale('info.dna_sample'),
+            type = "dna",
+            dnalabel = DnaHash(OtherPlayer.PlayerData.citizenid)
+        }
+        Player.Functions.AddItem("evidence_satchel", 1, false, info)
+    else
+        w.notify(src, { description = 'error.have_evidence_bag', type = 'error' })
     end
 end)
 
@@ -290,7 +378,8 @@ end)
 -- Callbacks
 WCore.Functions.CreateCallback('police:server:isPlayerDead', function(source, cb, playerId)
     local Player = WCore.Functions.GetPlayer(playerId)
-    cb(Player.PlayerData.metadata["isdead"])
+    -- a player who left meanwhile is answered, not an error that leaves the caller waiting
+    cb(Player and Player.PlayerData.metadata["isdead"] or false)
 end)
 
 WCore.Functions.CreateCallback('police:GetPlayerStatus', function(source, cb, playerId)
@@ -358,67 +447,220 @@ RegisterNetEvent('police:server:policeAlert', function(text)
     end
 end)
 
+-- ── acting on the man in front of you ────────────────────────────────────────────────
+-- The card on the closest player, the /cuff, /sc and /escort commands and the handcuffs item pick
+-- the man on the sender's client (the closest player within 1.5-2.5 m) and send his server id.
+-- A modified client can send any id: cuff a man across the map, walk him out of another routing
+-- bucket, read anybody's cash. So the events below check what the server itself knows: the man is
+-- in the game and is not the sender, both stand in the same routing bucket and within reach, the
+-- sender has the job on duty (or the handcuffs) the action needs, and the man is cuffed or down
+-- where the action needs it. The card and the commands pass every check as before; the jail, fine,
+-- seizure and robbery events have their own checks (closePlayers) above and below.
+
+--- metres between the two, measured on the server. The client picks within 2.5 m; the server's
+--- positions trail the clients' a little, so it allows the same 5 m as the jail and fine checks.
+local REACH = 5.0
+--- metres for taking a man out of a wagon: he may sit at the far end of a long prison wagon
+local WAGON_REACH = 8.0
+
+--- On duty in one of these jobs (the job is the server's own record, not the client's word).
+---@param player table core player
+---@param ... string job names
+---@return boolean
+local function onDutyAs(player, ...)
+    local job = player.PlayerData.job
+    if type(job) ~= 'table' or not job.onduty then return false end
+    for i = 1, select('#', ...) do
+        if job.name == select(i, ...) then return true end
+    end
+    return false
+end
+
+--- Cuffed, dead or in last stand: a man who cannot walk away (his core metadata).
+---@param player table core player
+---@return boolean
+local function isHelpless(player)
+    local meta = player.PlayerData.metadata or {}
+    return (meta.ishandcuffed or meta.isdead or meta.inlaststand) and true or false
+end
+
+--- Where the server places a player: his ped, and the wagon he sits in when he sits in one (a
+--- seated man is measured at his wagon too).
+---@param src integer
+---@return vector3[]|nil
+local function placesOf(src)
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then return nil end
+    local places = { GetEntityCoords(ped) }
+    local vehicle = GetVehiclePedIsIn(ped, false)
+    if vehicle and vehicle ~= 0 then places[2] = GetEntityCoords(vehicle) end
+    return places
+end
+
+--- Both in the same routing bucket and within `reach` metres of each other.
+---@param a integer server id
+---@param b integer server id
+---@param reach number metres
+---@return boolean
+local function withinReach(a, b, reach)
+    if GetPlayerRoutingBucket(a) ~= GetPlayerRoutingBucket(b) then return false end
+    local from, to = placesOf(a), placesOf(b)
+    if not from or not to then return false end
+    for _, p in ipairs(from) do
+        for _, q in ipairs(to) do
+            if #(p - q) <= reach then return true end
+        end
+    end
+    return false
+end
+
+--- Refuse an action: a debug line for the server owner and, when `key` is given, the reason to
+--- the sender (a dictionary key, translated on his client).
+---@param src integer
+---@param event string
+---@param why string
+---@param key string|nil
+local function refuseAct(src, event, why, key)
+    w.print.debug(('police:server:%s from %s refused: %s'):format(event, tostring(src), why))
+    if key then w.notify(src, { description = key, type = 'error' }) end
+end
+
+--- The sender and the man he acts on (core players), or nothing when that man is not in the
+--- game, is the sender himself, or does not stand next to him.
+---@param src integer the sender
+---@param playerId any the man's server id, as the client sent it
+---@param event string the event name, for the debug line
+---@param reach number|nil metres (REACH)
+---@return table|nil actor, table|nil target
+local function nearTarget(src, playerId, event, reach)
+    local actor = WCore.Functions.GetPlayer(src)
+    if not actor then return end
+    -- a number only: WCore.Functions.GetPlayer reads a string as a license / identifier
+    local id = tonumber(playerId)
+    local target = id and id ~= src and WCore.Functions.GetPlayer(id) or nil
+    if not target then
+        return refuseAct(src, event, ('no other player %s'):format(tostring(playerId)), 'error.none_nearby')
+    end
+    reach = reach or REACH
+    if not withinReach(src, target.PlayerData.source, reach) then
+        return refuseAct(src, event, ('player %s is not within %s m in the same bucket'):format(tostring(id), tostring(reach)),
+            'error.none_nearby')
+    end
+    return actor, target
+end
+
+-- ── the cuff flag ────────────────────────────────────────────────────────────────────────
+-- The core metadata 'ishandcuffed' is what the escort, wagon and robbery checks here and the
+-- inventory's item use read. It used to be whatever the man's own client reported through
+-- police:server:SetHandcuffStatus: a cuffed man cleared it and slipped out of those checks, and
+-- anybody could set it on himself. Now the server decides when it may change:
+--   * CuffPlayer (checked: the reach, the handcuffs or a lawman on duty) sends the man GetCuffed
+--     and grants his client one answer within CUFF_ANSWER_MS. His client toggles its own cuffs
+--     and answers with what it did (true cuffed, false uncuffed: the same card cuffs and uncuffs),
+--     so the flag follows the man's real state;
+--   * without such a grant a client may only clear the flag while the server knows him dead or in
+--     last stand and in a hospital bed (w_ambulancejob's hospital respawn takes the cuffs off a
+--     dead man on his client, right after it put him in the bed);
+--   * the character loading or logging out and the jail clear it on the server itself (below and
+--     jailInPlay): the client still reports those, harmlessly, as the flag is already false.
+local CUFF_ANSWER_MS = 10000
+local cuffGrants = {} -- [server id] = { n = answers still owed, expires = GetGameTimer() deadline }
+
+--- CuffPlayer sent this man GetCuffed: his client owes one answer.
+---@param target integer
+local function grantCuffAnswer(target)
+    local now = GetGameTimer()
+    local grant = cuffGrants[target]
+    if not grant or grant.expires <= now then
+        grant = { n = 0 }
+        cuffGrants[target] = grant
+    end
+    grant.n = grant.n + 1
+    grant.expires = now + CUFF_ANSWER_MS
+end
+
+--- Use up one owed answer, if this man has one.
+---@param src integer
+---@return boolean
+local function takeCuffAnswer(src)
+    local grant = cuffGrants[src]
+    if not grant then return false end
+    if grant.expires <= GetGameTimer() then
+        cuffGrants[src] = nil
+        return false
+    end
+    grant.n = grant.n - 1
+    if grant.n <= 0 then cuffGrants[src] = nil end
+    return true
+end
+
+-- Cuff / uncuff (the man's client toggles). The handcuffs item cuffs anybody, hard or soft, in
+-- any job; without it only a lawman on duty soft-cuffs (/sc). The hard cuff of the card and of
+-- /cuff asks for the handcuffs on the client as well.
 RegisterNetEvent('police:server:CuffPlayer', function(playerId, isSoftcuff)
     local src = source
-    local Player = WCore.Functions.GetPlayer(src)
-    local CuffedPlayer = WCore.Functions.GetPlayer(playerId)
-    if CuffedPlayer then
-        if Player.Functions.GetItemByName("handcuffs") or Player.PlayerData.job.name == "police" then
-            TriggerClientEvent("police:client:GetCuffed", CuffedPlayer.PlayerData.source, Player.PlayerData.source, isSoftcuff)
-        end
+    local Player, CuffedPlayer = nearTarget(src, playerId, 'CuffPlayer')
+    if not Player then return end
+    local soft = isSoftcuff == true
+    if not Player.Functions.GetItemByName(Config.HandCuffItem or 'handcuffs') and not (soft and onDutyAs(Player, 'police')) then
+        return refuseAct(src, 'CuffPlayer', soft and 'no handcuffs and not a lawman on duty' or 'no handcuffs', 'error.no_cuff')
     end
+    grantCuffAnswer(CuffedPlayer.PlayerData.source)
+    TriggerClientEvent("police:client:GetCuffed", CuffedPlayer.PlayerData.source, src, soft)
 end)
 
+-- Escort / release (the man's client toggles, and follows only while he is cuffed or down). A
+-- lawman or a doctor on duty walks anybody; everybody else a cuffed, dead or downed man.
 RegisterNetEvent('police:server:EscortPlayer', function(playerId)
     local src = source
-    local Player = WCore.Functions.GetPlayer(source)
-    local EscortPlayer = WCore.Functions.GetPlayer(playerId)
-    if EscortPlayer then
-        if (Player.PlayerData.job.name == "police" or Player.PlayerData.job.name == "ambulance") or (EscortPlayer.PlayerData.metadata["ishandcuffed"] or EscortPlayer.PlayerData.metadata["isdead"] or EscortPlayer.PlayerData.metadata["inlaststand"]) then
-            TriggerClientEvent("police:client:GetEscorted", EscortPlayer.PlayerData.source, Player.PlayerData.source)
-        else
-            w.notify(src, { description = 'error.not_cuffed_dead', type = 'error' })
-        end
+    local Player, EscortPlayer = nearTarget(src, playerId, 'EscortPlayer')
+    if not Player then return end
+    if onDutyAs(Player, 'police', 'ambulance') or isHelpless(EscortPlayer) then
+        TriggerClientEvent("police:client:GetEscorted", EscortPlayer.PlayerData.source, src)
+    else
+        w.notify(src, { description = 'error.not_cuffed_dead', type = 'error' })
     end
 end)
 
+-- Carry on the shoulder / put down: anybody, a cuffed, dead or downed man only.
 RegisterNetEvent('police:server:KidnapPlayer', function(playerId)
     local src = source
-    local Player = WCore.Functions.GetPlayer(source)
-    local EscortPlayer = WCore.Functions.GetPlayer(playerId)
-    if EscortPlayer then
-        if EscortPlayer.PlayerData.metadata["ishandcuffed"] or EscortPlayer.PlayerData.metadata["isdead"] or
-            EscortPlayer.PlayerData.metadata["inlaststand"] then
-            TriggerClientEvent("police:client:GetKidnappedTarget", EscortPlayer.PlayerData.source, Player.PlayerData.source)
-            TriggerClientEvent("police:client:GetKidnappedDragger", Player.PlayerData.source, EscortPlayer.PlayerData.source)
-        else
-            w.notify(src, { description = 'error.not_cuffed_dead', type = 'error' })
-        end
+    local Player, EscortPlayer = nearTarget(src, playerId, 'KidnapPlayer')
+    if not Player then return end
+    if isHelpless(EscortPlayer) then
+        TriggerClientEvent("police:client:GetKidnappedTarget", EscortPlayer.PlayerData.source, src)
+        TriggerClientEvent("police:client:GetKidnappedDragger", src, EscortPlayer.PlayerData.source)
+    else
+        w.notify(src, { description = 'error.not_cuffed_dead', type = 'error' })
     end
 end)
 
+-- Wagons: the lawman card only (on duty), a cuffed or dead man only.
 RegisterNetEvent('police:server:SetPlayerOutVehicle', function(playerId)
     local src = source
-    local Player = WCore.Functions.GetPlayer(source)
-    local EscortPlayer = WCore.Functions.GetPlayer(playerId)
-    if EscortPlayer then
-        if EscortPlayer.PlayerData.metadata["ishandcuffed"] or EscortPlayer.PlayerData.metadata["isdead"] then
-            TriggerClientEvent("police:client:SetOutVehicle", EscortPlayer.PlayerData.source)
-        else
-            w.notify(src, { description = 'error.not_cuffed_dead', type = 'error' })
-        end
+    local Player, EscortPlayer = nearTarget(src, playerId, 'SetPlayerOutVehicle', WAGON_REACH)
+    if not Player then return end
+    if not onDutyAs(Player, 'police') then
+        return refuseAct(src, 'SetPlayerOutVehicle', 'not a lawman on duty', 'error.on_duty_police_only')
+    end
+    if EscortPlayer.PlayerData.metadata["ishandcuffed"] or EscortPlayer.PlayerData.metadata["isdead"] then
+        TriggerClientEvent("police:client:SetOutVehicle", EscortPlayer.PlayerData.source)
+    else
+        w.notify(src, { description = 'error.not_cuffed_dead', type = 'error' })
     end
 end)
 
 RegisterNetEvent('police:server:PutPlayerInVehicle', function(playerId)
     local src = source
-    local EscortPlayer = WCore.Functions.GetPlayer(playerId)
-    if EscortPlayer then
-        if EscortPlayer.PlayerData.metadata["ishandcuffed"] or EscortPlayer.PlayerData.metadata["isdead"] then
-            TriggerClientEvent("police:client:PutInVehicle", EscortPlayer.PlayerData.source)
-        else
-            w.notify(src, { description = 'error.not_cuffed_dead', type = 'error' })
-        end
+    local Player, EscortPlayer = nearTarget(src, playerId, 'PutPlayerInVehicle')
+    if not Player then return end
+    if not onDutyAs(Player, 'police') then
+        return refuseAct(src, 'PutPlayerInVehicle', 'not a lawman on duty', 'error.on_duty_police_only')
+    end
+    if EscortPlayer.PlayerData.metadata["ishandcuffed"] or EscortPlayer.PlayerData.metadata["isdead"] then
+        TriggerClientEvent("police:client:PutInVehicle", EscortPlayer.PlayerData.source)
+    else
+        w.notify(src, { description = 'error.not_cuffed_dead', type = 'error' })
     end
 end)
 
@@ -437,43 +679,90 @@ RegisterNetEvent('police:server:BillPlayer', function(playerId, price)
     end
 end)
 
+-- The walk-up card's jail (client/interactions.lua JailTarget: the suspect in front of the officer).
+-- The server id comes from that proximity pick, so the suspect must still stand next to the
+-- officer: the /jail command no longer comes through here, and a remote id is refused.
 RegisterNetEvent('police:server:JailPlayer', function(playerId, time)
     local src = source
     local Player = WCore.Functions.GetPlayer(src)
-    local OtherPlayer = WCore.Functions.GetPlayer(playerId)
-    local currentDate = os.date("*t")
-    if currentDate.day == 31 then
-        currentDate.day = 30
-    end
+    local OtherPlayer = WCore.Functions.GetPlayer(tonumber(playerId))
+    time = tonumber(time)
+    if not time or time ~= time or time <= 0 or time == math.huge then return end
 
-    if Player.PlayerData.job.name == "police" then
-        if OtherPlayer then
-            OtherPlayer.Functions.SetMetaData("injail", time)
-            OtherPlayer.Functions.SetMetaData("criminalrecord", {
-                ["hasRecord"] = true,
-                ["date"] = currentDate
-            })
-            TriggerClientEvent("police:client:SendToJail", OtherPlayer.PlayerData.source, time)
-            TriggerClientEvent('police:client:notify', src, 'info.sent_jail_for', 'inform', time)
+    if Player and Player.PlayerData.job.name == "police" then
+        if OtherPlayer and closePlayers(Player, OtherPlayer) then
+            jailInPlay(src, OtherPlayer, time)
         end
     end
 end)
 
+--- A dead man's respawn at the hospital: w_ambulancejob puts him in a bed (hospital:server:
+--- RespawnAtHospital) before his client drops the cuffs, and his events arrive in that order. The
+--- death itself is only his client's word (hospital:server:SetDeathStatus), so without the bed a
+--- cuffed man sent "dead", then "uncuffed", then "alive", and walked out of the cuffs where he stood.
+---@param src integer
+---@return boolean
+local function respawnedAtHospital(src)
+    if GetResourceState('w_ambulancejob') ~= 'started' then return true end -- no bed to check
+    local ok, inBed = pcall(function() return exports.w_ambulancejob:InHospitalBed(src) end)
+    -- an export that fails (w_ambulancejob restarting) must not keep a respawned man cuffed
+    return not ok or inBed == true
+end
+
+-- The man's own client reports its cuffs (see "the cuff flag" above for what is honoured).
 RegisterNetEvent('police:server:SetHandcuffStatus', function(isHandcuffed)
     local src = source
     local Player = WCore.Functions.GetPlayer(src)
-    if Player then
+    if not Player or type(isHandcuffed) ~= 'boolean' then return end
+    local meta = Player.PlayerData.metadata or {}
+    if takeCuffAnswer(src) then
         Player.Functions.SetMetaData("ishandcuffed", isHandcuffed)
+    elseif not isHandcuffed and meta.ishandcuffed and (meta.isdead or meta.inlaststand) and respawnedAtHospital(src) then
+        Player.Functions.SetMetaData("ishandcuffed", false)
+    elseif isHandcuffed ~= (meta.ishandcuffed == true) then
+        refuseAct(src, 'SetHandcuffStatus', ('%s without a cuff from the server'):format(tostring(isHandcuffed)))
     end
 end)
 
+--- Clear a player's cuff flag on the server (his client has dropped the cuffs).
+---@param src integer
+local function clearCuffFlag(src)
+    local Player = WCore.Functions.GetPlayer(src)
+    if Player and (Player.PlayerData.metadata or {}).ishandcuffed then
+        Player.Functions.SetMetaData("ishandcuffed", false)
+    end
+end
+
+-- A character loading or logging out comes free of the cuffs (client/main.lua drops them on his
+-- client), as before; the flag is cleared here now instead of on his client's word.
+AddEventHandler('WCore:Server:PlayerLoaded', function(Player)
+    local src = Player and Player.PlayerData and tonumber(Player.PlayerData.source)
+    if not src then return end
+    cuffGrants[src] = nil
+    clearCuffFlag(src)
+end)
+
+AddEventHandler('WCore:Server:OnPlayerUnload', function(src)
+    src = tonumber(src)
+    if not src then return end
+    cuffGrants[src] = nil
+    clearCuffFlag(src)
+end)
+
+AddEventHandler('playerDropped', function()
+    cuffGrants[source] = nil
+end)
+
+-- The lawman card's search (on duty): the cash he finds, and the man is told he is searched.
 RegisterNetEvent('police:server:SearchPlayer', function(playerId)
     local src = source
-    local SearchedPlayer = WCore.Functions.GetPlayer(playerId)
-    if SearchedPlayer then
-        TriggerClientEvent('police:client:notify', src, 'info.cash_found', 'inform', SearchedPlayer.PlayerData.money["cash"])
-        w.notify(SearchedPlayer.PlayerData.source, { description = 'info.being_searched', type = 'inform' })
+    local Player, SearchedPlayer = nearTarget(src, playerId, 'SearchPlayer')
+    if not Player then return end
+    if not onDutyAs(Player, 'police') then
+        return refuseAct(src, 'SearchPlayer', 'not a lawman on duty', 'error.on_duty_police_only')
     end
+    TriggerClientEvent('police:client:notify', src, 'info.cash_found', 'inform', SearchedPlayer.PlayerData.money["cash"])
+    w.notify(SearchedPlayer.PlayerData.source, { description = 'info.being_searched', type = 'inform' })
 end)
 
 RegisterNetEvent('police:server:SeizeCash', function(playerId)

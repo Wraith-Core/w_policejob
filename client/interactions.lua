@@ -5,7 +5,7 @@ CUFF_NONE = 'none'
 CUFF_HARD = 'hard'
 CUFF_SOFT = 'soft'
 
--- the hands-up loop played by the w_smallresources keybind
+-- the hands-up loop played by the w_lib essentials keybind (resource/essentials/client.lua)
 local HANDS_UP_DICT <const> = 'script_proc@robberies@homestead@lonnies_shack@deception'
 local HANDS_UP_ANIM <const> = 'hands_up_loop'
 
