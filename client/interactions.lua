@@ -181,11 +181,29 @@ end
 
 -- ── the card on the closest player ───────────────────────────────────────────────────
 -- One library prompt card follows the closest other player. A lawman on duty gets the law
--- actions; everybody else gets the civilian ones (rob a person with his hands up, escort or
--- carry a cuffed / downed person). Labels and rows follow the target's replicated state.
+-- actions, and only while he is zoomed on that player (free aim or lock-on): standing beside
+-- him is not enough. Everybody else gets the civilian ones (rob a person with his hands up,
+-- escort or carry a cuffed / downed person). Labels and rows follow the target's replicated state.
 
 local TARGET_SCAN <const> = 3.0     -- metres: look for the closest player this far
 local TARGET_REACH <const> = 2.0    -- metres: the card shows this close
+
+--- Zoomed on this ped: free aim or the lock-on camera, not merely standing next to him.
+--- BOOL natives answer 1 on this runtime, and 0 is truthy in Lua.
+---@param ped integer
+---@return boolean
+local function ZoomedOn(ped)
+    if type(ped) ~= 'number' or ped == 0 then return false end
+    local player = PlayerId()
+    local function yes(name, ...)
+        local fn = _ENV[name]
+        if type(fn) ~= 'function' then return false end
+        local ok, value = pcall(fn, ...)
+        return ok and (value == true or value == 1)
+    end
+    return yes('IsPlayerFreeAimingAtEntity', player, ped)
+        or yes('IsPlayerTargettingEntity', player, ped, false)
+end
 
 local Target = nil   -- { id, ped, serverId, lawman, rec, labels = {}, visible = {} }
 
@@ -265,7 +283,7 @@ local function BuildTarget(id, ped, lawman)
         prompts = lawman and LawmanPrompts() or CivilianPrompts(),
         canInteract = function()
             if not CanAct() then return false end
-            if lawman then return true end
+            if lawman then return ZoomedOn(ped) end
             -- the civilian card only has something to offer for a helpless person
             for _, shown in pairs(t.visible) do
                 if shown then return true end
