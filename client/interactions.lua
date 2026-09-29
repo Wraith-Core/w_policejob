@@ -325,6 +325,25 @@ function RefreshPlayerPrompt()
     RefreshTarget(true)
 end
 
+-- Aiming at a player also raises the game's own prompt bars (English, no Arabic) and the
+-- target's name with its rule, drawn in the same corner as this card. The card is an HTML
+-- overlay, so it is immune to the frame-wide native that puts those bars out. Only while the
+-- lawman card is the one up: a blanket disable the rest of the time would hide every other
+-- script's bars too.
+local UI_PROMPT_DISABLE_PROMPTS_THIS_FRAME <const> = 0xF1622CE88A1946FB
+
+CreateThread(function()
+    while true do
+        local t = Target
+        if t and t.lawman and t.ped and ZoomedOn(t.ped) and CanAct() then
+            Citizen.InvokeNative(UI_PROMPT_DISABLE_PROMPTS_THIS_FRAME)
+            Wait(0)
+        else
+            Wait(200)
+        end
+    end
+end)
+
 -- Doctors get their own card on the closest player from w_ambulancejob (check / treat / revive);
 -- two resources cannot share one screen, so they keep escort / carry on the /escort command.
 local function WantsPlayerCard()
