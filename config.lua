@@ -179,4 +179,24 @@ Config.Items = {
 
 ---------------------------------------------
 
+-- The prison (Sisika). A sentence is counted in months; the server takes one month off every
+-- monthSeconds of play and lets the man out at Saint Denis when it reaches 0 (server/main.lua,
+-- "the prison"). Until 2026-10-14 there was no prison at all: SendToJail fired prison:client:Enter
+-- and nothing listened, so a sentence was a number on the file and the man walked off.
+-- ⚠️ The yard coordinates were not checked in game. If a prisoner lands wrong, stand where they
+--    should be and replace `cell` (the ground height is looked up under the point anyway).
+Config.Prison = {
+    cell = vector4(3425.0, -610.0, 44.0, 268.0),         -- Sisika, the eastern yard
+    release = vector4(2501.83, -1309.04, 48.95, 90.0),   -- Saint Denis, outside the sheriff's HQ
+    radius = 150.0,      -- metres from `cell`: walk out of it and you are brought back
+    monthSeconds = 60,   -- one month of sentence = one minute of play
+    maxMonths = 120,     -- the longest sentence a lawman (or the MDT) can hand out
+}
+
+-- The largest fine one bill can take (police:server:BillPlayer). There was no ceiling: a lawman
+-- standing next to a man could bill his whole bank account into the police society.
+Config.MaxFine = 5000
+
+---------------------------------------------
+
 WCore = w.framework:getCoreObject()

@@ -160,6 +160,9 @@ end
 ---@param OtherPlayer table the suspect's core player
 ---@param time number months
 local function jailInPlay(src, OtherPlayer, time)
+    -- any finite number used to pass (1e300 months): a sentence has a ceiling now
+    time = math.min(tonumber(time) or 0, tonumber(Config.Prison and Config.Prison.maxMonths) or 120)
+    if time <= 0 then return end
     OtherPlayer.Functions.SetMetaData("injail", time)
     OtherPlayer.Functions.SetMetaData("criminalrecord", jailRecord())
     -- his client drops the cuffs on SendToJail; the server clears its own flag (see SetHandcuffStatus)
@@ -231,6 +234,7 @@ WCore.Commands.Add("jail", locale("commands.jail_player"), {{name = "id", help =
         if not time or time ~= time or time <= 0 or time == math.huge then
             return w.notify(src, { description = 'info.jail_time_no', type = 'inform' })
         end
+        time = math.min(time, tonumber(Config.Prison and Config.Prison.maxMonths) or 120)
         local target, reason = w.citizen.resolve(args[1], { self = src })
         if not target then return refuseTarget(src, reason) end
         if target.online then
@@ -568,7 +572,8 @@ local cuffGrants = {} -- [server id] = { n = answers still owed, expires = GetGa
 
 --- CuffPlayer sent this man GetCuffed: his client owes one answer.
 ---@param target integer
-local function grantCuffAnswer(target)
+---@param wanted boolean the state the server sent him to (true cuffed, false free)
+local function grantCuffAnswer(target, wanted)
     local now = GetGameTimer()
     local grant = cuffGrants[target]
     if not grant or grant.expires <= now then
@@ -576,12 +581,13 @@ local function grantCuffAnswer(target)
         cuffGrants[target] = grant
     end
     grant.n = grant.n + 1
+    grant.wanted = wanted
     grant.expires = now + CUFF_ANSWER_MS
 end
 
---- Use up one owed answer, if this man has one.
+--- Use up one owed answer, if this man has one: true and the state the server sent him to.
 ---@param src integer
----@return boolean
+---@return boolean, boolean?
 local function takeCuffAnswer(src)
     local grant = cuffGrants[src]
     if not grant then return false end
@@ -591,7 +597,7 @@ local function takeCuffAnswer(src)
     end
     grant.n = grant.n - 1
     if grant.n <= 0 then cuffGrants[src] = nil end
-    return true
+    return true, grant.wanted
 end
 
 -- Cuff / uncuff (the man's client toggles). The handcuffs item cuffs anybody, hard or soft, in
@@ -605,8 +611,11 @@ RegisterNetEvent('police:server:CuffPlayer', function(playerId, isSoftcuff)
     if not Player.Functions.GetItemByName(Config.HandCuffItem or 'handcuffs') and not (soft and onDutyAs(Player, 'police')) then
         return refuseAct(src, 'CuffPlayer', soft and 'no handcuffs and not a lawman on duty' or 'no handcuffs', 'error.no_cuff')
     end
-    grantCuffAnswer(CuffedPlayer.PlayerData.source)
-    TriggerClientEvent("police:client:GetCuffed", CuffedPlayer.PlayerData.source, src, soft)
+    -- the server decides the new state and sends it: his client applies it rather than toggling its
+    -- own, so the two can never drift apart (a toggle on a stale flag inverted it for good)
+    local wanted = not ((CuffedPlayer.PlayerData.metadata or {}).ishandcuffed == true)
+    grantCuffAnswer(CuffedPlayer.PlayerData.source, wanted)
+    TriggerClientEvent("police:client:GetCuffed", CuffedPlayer.PlayerData.source, src, soft, wanted)
 end)
 
 -- Escort / release (the man's client toggles, and follows only while he is cuffed or down). A
@@ -667,11 +676,14 @@ end)
 RegisterNetEvent('police:server:BillPlayer', function(playerId, price)
     local src = source
     local Player = WCore.Functions.GetPlayer(src)
-    local OtherPlayer = WCore.Functions.GetPlayer(playerId)
-    if Player.PlayerData.job.name == "police" then
+    -- a number only: GetPlayer reads a string as a license / identifier
+    local OtherPlayer = tonumber(playerId) and WCore.Functions.GetPlayer(tonumber(playerId)) or nil
+    -- on duty (an off-duty lawman billed a man's whole bank), and a ceiling on the fine
+    if Player and onDutyAs(Player, 'police') then
         if OtherPlayer then
             price = tonumber(price)
             if not closePlayers(Player, OtherPlayer) or not price or price ~= price or price <= 0 or price == math.huge or not economyReady() then return end
+            price = math.min(price, tonumber(Config.MaxFine) or 5000)
             if not exports.w_centralbank:EnsureAccount('society:police', 'police', 'society') then return end
             if not exports.w_centralbank:Transfer('player:' .. OtherPlayer.PlayerData.citizenid .. ':bank', 'society:police', price, 'police-bill') then return end
             TriggerClientEvent('police:client:notify', OtherPlayer.PlayerData.source, 'info.fine_received', 'inform', price)
@@ -689,7 +701,7 @@ RegisterNetEvent('police:server:JailPlayer', function(playerId, time)
     time = tonumber(time)
     if not time or time ~= time or time <= 0 or time == math.huge then return end
 
-    if Player and Player.PlayerData.job.name == "police" then
+    if Player and onDutyAs(Player, 'police') then
         if OtherPlayer and closePlayers(Player, OtherPlayer) then
             jailInPlay(src, OtherPlayer, time)
         end
@@ -704,9 +716,12 @@ end)
 ---@return boolean
 local function respawnedAtHospital(src)
     if GetResourceState('w_ambulancejob') ~= 'started' then return true end -- no bed to check
-    local ok, inBed = pcall(function() return exports.w_ambulancejob:InHospitalBed(src) end)
+    -- ★ The bed alone was not proof: a living man reported "dead", asked for the respawn, got a bed
+    --   for the price of the bill, and dropped his cuffs. RespawnedDead answers true only for a
+    --   respawn after the full death timer, as the death screen allows it (w_ambulancejob).
+    local ok, respawned = pcall(function() return exports.w_ambulancejob:RespawnedDead(src) end)
     -- an export that fails (w_ambulancejob restarting) must not keep a respawned man cuffed
-    return not ok or inBed == true
+    return not ok or respawned == true
 end
 
 -- The man's own client reports its cuffs (see "the cuff flag" above for what is honoured).
@@ -715,8 +730,17 @@ RegisterNetEvent('police:server:SetHandcuffStatus', function(isHandcuffed)
     local Player = WCore.Functions.GetPlayer(src)
     if not Player or type(isHandcuffed) ~= 'boolean' then return end
     local meta = Player.PlayerData.metadata or {}
-    if takeCuffAnswer(src) then
-        Player.Functions.SetMetaData("ishandcuffed", isHandcuffed)
+    local granted, wanted = takeCuffAnswer(src)
+    if granted then
+        -- ★ The state is the one CuffPlayer sent him to, not his answer: the man's client used to
+        --   choose, and a modified one answered false to every cuff and stayed free in every check
+        --   that reads the flag.
+        local cuffed = wanted
+        if cuffed == nil then cuffed = not (meta.ishandcuffed == true) end
+        if isHandcuffed ~= cuffed then
+            refuseAct(src, 'SetHandcuffStatus', ('answered %s to a cuff, the server holds %s'):format(tostring(isHandcuffed), tostring(cuffed)))
+        end
+        Player.Functions.SetMetaData("ishandcuffed", cuffed)
     elseif not isHandcuffed and meta.ishandcuffed and (meta.isdead or meta.inlaststand) and respawnedAtHospital(src) then
         Player.Functions.SetMetaData("ishandcuffed", false)
     elseif isHandcuffed ~= (meta.ishandcuffed == true) then
@@ -751,6 +775,50 @@ end)
 
 AddEventHandler('playerDropped', function()
     cuffGrants[source] = nil
+end)
+
+-- ── the prison ───────────────────────────────────────────────────────────────────────────
+-- The sentence is the core metadata 'injail' (months), set by jailInPlay, /jail and w_mdt. The
+-- server serves it: every Config.Prison.monthSeconds it takes a month off each jailed man in
+-- play, sends him back inside if he stands beyond the radius (an escape, or a fresh login: a
+-- sentence follows the character), and lets him out at 0. The client (client/prison.lua) only
+-- moves him. Offline time does not count -- the sentence waits for him.
+CreateThread(function()
+    local P = Config.Prison or {}
+    local cell = P.cell and vector3(P.cell.x, P.cell.y, P.cell.z)
+    if not cell then return end
+    local radius = tonumber(P.radius) or 150.0
+    local maxMonths = tonumber(P.maxMonths) or 120
+    while true do
+        Wait(math.max(10, tonumber(P.monthSeconds) or 60) * 1000)
+        for _, id in ipairs(GetPlayers()) do
+            local src = tonumber(id)
+            local Player = src and WCore.Functions.GetPlayer(src)
+            local left = Player and tonumber((Player.PlayerData.metadata or {}).injail) or 0
+            if left ~= left then left = 0 end
+            if left > 0 then
+                left = math.min(left, maxMonths) - 1
+                if left <= 0 then
+                    Player.Functions.SetMetaData('injail', 0)
+                    TriggerClientEvent('prison:client:UnjailPerson', src)
+                    TriggerClientEvent('police:client:notify', src, 'info.prison_released', 'success')
+                else
+                    Player.Functions.SetMetaData('injail', left)
+                    local ped = GetPlayerPed(src)
+                    local meta = Player.PlayerData.metadata or {}
+                    -- down or in a hospital bed: brought back once he is up again, not out of the bed
+                    local inCare = meta.isdead == true or meta.inlaststand == true
+                    if not inCare and GetResourceState('w_ambulancejob') == 'started' then
+                        local ok, bed = pcall(function() return exports.w_ambulancejob:InHospitalBed(src) end)
+                        inCare = ok and bed == true
+                    end
+                    if not inCare and ped and ped ~= 0 and #(GetEntityCoords(ped) - cell) > radius then
+                        TriggerClientEvent('prison:client:Enter', src, left, true)
+                    end
+                end
+            end
+        end
+    end
 end)
 
 -- The lawman card's search (on duty): the cash he finds, and the man is told he is searched.

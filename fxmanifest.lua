@@ -17,6 +17,7 @@ client_scripts {
 	'client/job.lua',
 	'client/evidence.lua',
 	'client/objects.lua',
+	'client/prison.lua',
 }
 
 server_scripts {

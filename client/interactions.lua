@@ -522,9 +522,13 @@ RegisterNetEvent('police:client:GetKidnappedDragger', function(playerId)
     end)
 end)
 
-RegisterNetEvent('police:client:GetCuffed', function(playerId, isSoftcuff)
+RegisterNetEvent('police:client:GetCuffed', function(playerId, isSoftcuff, wanted)
     local ped = cache.ped
-    if not isHandcuffed then
+    -- `wanted` is the state the server decided (CuffPlayer): applied as sent, so this client and the
+    -- server's flag never drift apart. Without it (a local call, e.g. the hospital respawn), toggle.
+    local cuff
+    if wanted == nil then cuff = not isHandcuffed else cuff = wanted == true end
+    if cuff then
         SetHandcuffed(true)
         TriggerServerEvent("police:server:SetHandcuffStatus", true)
         ClearPedTasksImmediately(ped)
