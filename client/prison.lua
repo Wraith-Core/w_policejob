@@ -61,12 +61,12 @@ RegisterNetEvent('prison:client:UnjailPerson', function()
     if wasJailed or inside then moveTo(P.release) end
 end)
 
---- Down, or in a hospital bed (w_ambulancejob): not the moment to be carried back to the yard --
+--- Down, or in a hospital bed (w_medic): not the moment to be carried back to the yard --
 --- the server brings him back once he is up and about again.
 local function inMedicalCare()
-    if GetResourceState('w_ambulancejob') ~= 'started' then return IsEntityDead(cache.ped) end
+    if GetResourceState('w_medic') ~= 'started' then return IsEntityDead(cache.ped) end
     local ok, care = pcall(function()
-        return exports.w_ambulancejob:IsDead() or exports.w_ambulancejob:InHospitalBed()
+        return exports.w_medic:IsDead() or exports.w_medic:InHospitalBed()
     end)
     return (ok and care == true) or IsEntityDead(cache.ped)
 end

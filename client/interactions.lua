@@ -344,10 +344,10 @@ CreateThread(function()
     end
 end)
 
--- Doctors get their own card on the closest player from w_ambulancejob (check / treat / revive);
+-- Doctors get their own card on the closest player from w_medic (check / treat / revive);
 -- two resources cannot share one screen, so they keep escort / carry on the /escort command.
 local function WantsPlayerCard()
-    return LocalPlayer.state.isLoggedIn and PlayerJob.name ~= 'ambulance'
+    return LocalPlayer.state.isLoggedIn and PlayerJob.name ~= 'doctor'
 end
 
 CreateThread(function()

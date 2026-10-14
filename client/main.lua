@@ -125,7 +125,7 @@ end)
 
 RegisterNetEvent('police:client:UpdateBlips', function(players)
     if Config.ShowBlips then
-        if PlayerJob and (PlayerJob.name == 'police' or PlayerJob.name == 'ambulance') and onDuty then
+        if PlayerJob and (PlayerJob.name == 'police' or PlayerJob.name == 'doctor') and onDuty then
             RemoveDutyBlips()
             if players then
                 for _, data in pairs(players) do

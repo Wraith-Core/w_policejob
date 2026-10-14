@@ -23,7 +23,7 @@ local function UpdateBlips()
     local dutyPlayers = {}
     local players = WCore.Functions.GetWPlayers()
     for _, v in pairs(players) do
-        if v and (v.PlayerData.job.name == "police" or v.PlayerData.job.name == "ambulance") and v.PlayerData.job.onduty then
+        if v and (v.PlayerData.job.name == "police" or v.PlayerData.job.name == "doctor") and v.PlayerData.job.onduty then
             local coords = GetEntityCoords(GetPlayerPed(v.PlayerData.source))
             local heading = GetEntityHeading(GetPlayerPed(v.PlayerData.source))
             dutyPlayers[#dutyPlayers+1] = {
@@ -624,7 +624,7 @@ RegisterNetEvent('police:server:EscortPlayer', function(playerId)
     local src = source
     local Player, EscortPlayer = nearTarget(src, playerId, 'EscortPlayer')
     if not Player then return end
-    if onDutyAs(Player, 'police', 'ambulance') or isHelpless(EscortPlayer) then
+    if onDutyAs(Player, 'police', 'doctor') or isHelpless(EscortPlayer) then
         TriggerClientEvent("police:client:GetEscorted", EscortPlayer.PlayerData.source, src)
     else
         w.notify(src, { description = 'error.not_cuffed_dead', type = 'error' })
@@ -708,19 +708,19 @@ RegisterNetEvent('police:server:JailPlayer', function(playerId, time)
     end
 end)
 
---- A dead man's respawn at the hospital: w_ambulancejob puts him in a bed (hospital:server:
+--- A dead man's respawn at the hospital: w_medic puts him in a bed (hospital:server:
 --- RespawnAtHospital) before his client drops the cuffs, and his events arrive in that order. The
 --- death itself is only his client's word (hospital:server:SetDeathStatus), so without the bed a
 --- cuffed man sent "dead", then "uncuffed", then "alive", and walked out of the cuffs where he stood.
 ---@param src integer
 ---@return boolean
 local function respawnedAtHospital(src)
-    if GetResourceState('w_ambulancejob') ~= 'started' then return true end -- no bed to check
+    if GetResourceState('w_medic') ~= 'started' then return true end -- no bed to check
     -- ★ The bed alone was not proof: a living man reported "dead", asked for the respawn, got a bed
     --   for the price of the bill, and dropped his cuffs. RespawnedDead answers true only for a
-    --   respawn after the full death timer, as the death screen allows it (w_ambulancejob).
-    local ok, respawned = pcall(function() return exports.w_ambulancejob:RespawnedDead(src) end)
-    -- an export that fails (w_ambulancejob restarting) must not keep a respawned man cuffed
+    --   respawn after the full bleed-out, as the death screen allows it (w_medic).
+    local ok, respawned = pcall(function() return exports.w_medic:RespawnedDead(src) end)
+    -- an export that fails (w_medic restarting) must not keep a respawned man cuffed
     return not ok or respawned == true
 end
 
@@ -808,8 +808,8 @@ CreateThread(function()
                     local meta = Player.PlayerData.metadata or {}
                     -- down or in a hospital bed: brought back once he is up again, not out of the bed
                     local inCare = meta.isdead == true or meta.inlaststand == true
-                    if not inCare and GetResourceState('w_ambulancejob') == 'started' then
-                        local ok, bed = pcall(function() return exports.w_ambulancejob:InHospitalBed(src) end)
+                    if not inCare and GetResourceState('w_medic') == 'started' then
+                        local ok, bed = pcall(function() return exports.w_medic:InHospitalBed(src) end)
                         inCare = ok and bed == true
                     end
                     if not inCare and ped and ped ~= 0 and #(GetEntityCoords(ped) - cell) > radius then
