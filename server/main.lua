@@ -882,53 +882,158 @@ RegisterNetEvent('police:server:RobPlayer', function(playerId)
     TriggerClientEvent('police:client:notify', robber.PlayerData.source, 'info.stolen_money', 'inform', amount)
 end)
 
+-- ── evidence and police objects (audit 2026-10-18) ──────────────────────────────────────────
+-- The server decides what a piece of evidence says: a blood drop is the SENDER's own blood (his citizenid and
+-- bloodtype, never the client's), every drop / print / casing is made near the sender at a bounded rate, and each
+-- store is capped (the oldest goes; CreateBloodId looped forever once the 90 000 ids were taken). A collected satchel
+-- is built here from the stored piece, never from the client's table. Only an on-duty officer clears evidence or
+-- places / removes police objects.
+local EVIDENCE_MAX = 2000            -- pieces per kind; the oldest is removed when full
+local EVIDENCE_NEAR = 15.0           -- a new piece within this of the sender's ped
+local EVIDENCE_REACH = 6.0           -- collecting: the piece within this of the collector
+local EVIDENCE_CLEAR = 12.0          -- clearing: the piece within this of the officer
+local EVIDENCE_RATE = 30             -- new pieces per player per kind per 10 s
+local evidenceOrder = { blood = {}, finger = {}, casing = {} }
+local evidenceRate = {}
+
+local function onDutyPolice(src)
+    local Player = WCore.Functions.GetPlayer(src)
+    return Player ~= nil and Player.PlayerData.job.name == 'police' and Player.PlayerData.job.onduty == true
+end
+
+local function pedCoords(src)
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then return nil end
+    return GetEntityCoords(ped)
+end
+
+--- the client's coords as a vector3 when they are numbers within `range` of the sender's ped, else nil
+local function nearSender(src, c, range)
+    if type(c) ~= 'table' and type(c) ~= 'vector3' then return nil end
+    local x, y, z = tonumber(c.x), tonumber(c.y), tonumber(c.z)
+    if not x or not y or not z or x ~= x or y ~= y or z ~= z then return nil end
+    local v, at = vector3(x, y, z), pedCoords(src)
+    if not at or #(at - v) > range then return nil end
+    return v
+end
+
+local function evidenceAllowed(src, kind)
+    local now = GetGameTimer()
+    local r = evidenceRate[src]
+    if not r or now - r.at > 10000 then
+        r = { at = now }
+        evidenceRate[src] = r
+    end
+    r[kind] = (r[kind] or 0) + 1
+    return r[kind] <= EVIDENCE_RATE
+end
+
+--- remembers a new piece; when the kind is full the oldest still stored is removed for everyone. An entry is
+--- { id, piece }: a collected / cleared piece is skipped, and an id reused by a newer piece is never taken for it.
+local function rememberEvidence(kind, store, id, removeEvent)
+    local order = evidenceOrder[kind]
+    order[#order + 1] = { id = id, piece = store[id] }
+    local n = 0
+    for _ in pairs(store) do n = n + 1 end
+    while n > EVIDENCE_MAX and #order > 0 do
+        local old = table.remove(order, 1)
+        if store[old.id] == old.piece then
+            store[old.id] = nil
+            n = n - 1
+            TriggerClientEvent(removeEvent, -1, old.id)
+        end
+    end
+    if #order > 2 * EVIDENCE_MAX then             -- the list keeps only pieces still stored
+        local live = {}
+        for _, e in ipairs(order) do if store[e.id] == e.piece then live[#live + 1] = e end end
+        evidenceOrder[kind] = live
+    end
+end
+
+local function storedNear(piece, at, range)
+    return piece ~= nil and piece.coords ~= nil and at ~= nil and #(at - piece.coords) <= range
+end
+
+AddEventHandler('playerDropped', function()
+    evidenceRate[source] = nil
+end)
+
 RegisterNetEvent('police:server:spawnObject', function(type)
     local src = source
+    if not onDutyPolice(src) then return end
     local objectId = CreateObjectId()
     Objects[objectId] = type
     TriggerClientEvent("police:client:spawnObject", src, objectId, type, src)
 end)
 
 RegisterNetEvent('police:server:deleteObject', function(objectId)
+    local src = source
+    if not onDutyPolice(src) or Objects[objectId] == nil then return end
+    Objects[objectId] = nil
     TriggerClientEvent('police:client:removeObject', -1, objectId)
 end)
 
 RegisterNetEvent('evidence:server:UpdateStatus', function(data)
     local src = source
+    -- audit 2026-10-18: a small table only (it was any client table, kept in memory per player)
+    if type(data) ~= 'table' then return end
+    local n = 0
+    for _, v in pairs(data) do
+        n = n + 1
+        if n > 32 or type(v) ~= 'table' or (v.text ~= nil and type(v.text) ~= 'string') then return end
+    end
     PlayerStatus[src] = data
 end)
 
-RegisterNetEvent('evidence:server:CreateBloodDrop', function(citizenid, bloodtype, coords)
+RegisterNetEvent('evidence:server:CreateBloodDrop', function(_, _, coords)
+    local src = source
+    local Player = WCore.Functions.GetPlayer(src)
+    local c = Player and nearSender(src, coords, EVIDENCE_NEAR)
+    if not c or not evidenceAllowed(src, 'blood') then return end
+    local dna, bloodtype = Player.PlayerData.citizenid, Player.PlayerData.metadata["bloodtype"]
     local bloodId = CreateBloodId()
-    BloodDrops[bloodId] = {
-        dna = citizenid,
-        bloodtype = bloodtype
-    }
-    TriggerClientEvent("evidence:client:AddBlooddrop", -1, bloodId, citizenid, bloodtype, coords)
+    BloodDrops[bloodId] = { dna = dna, bloodtype = bloodtype, coords = c }
+    rememberEvidence('blood', BloodDrops, bloodId, "evidence:client:RemoveBlooddrop")
+    TriggerClientEvent("evidence:client:AddBlooddrop", -1, bloodId, dna, bloodtype, c)
 end)
 
 RegisterNetEvent('evidence:server:CreateFingerDrop', function(coords)
     local src = source
     local Player = WCore.Functions.GetPlayer(src)
+    local c = Player and nearSender(src, coords, EVIDENCE_NEAR)
+    if not c or not evidenceAllowed(src, 'finger') then return end
+    local fingerprint = Player.PlayerData.metadata["fingerprint"]
     local fingerId = CreateFingerId()
-    FingerDrops[fingerId] = Player.PlayerData.metadata["fingerprint"]
-    TriggerClientEvent("evidence:client:AddFingerPrint", -1, fingerId, Player.PlayerData.metadata["fingerprint"], coords)
+    FingerDrops[fingerId] = { fingerprint = fingerprint, coords = c }
+    rememberEvidence('finger', FingerDrops, fingerId, "evidence:client:RemoveFingerprint")
+    TriggerClientEvent("evidence:client:AddFingerPrint", -1, fingerId, fingerprint, c)
 end)
 
 RegisterNetEvent('evidence:server:ClearBlooddrops', function(blooddropList)
-    if blooddropList and next(blooddropList) then
-        for k, v in pairs(blooddropList) do
+    local src = source
+    if not onDutyPolice(src) or type(blooddropList) ~= 'table' then return end
+    local at = pedCoords(src)
+    for _, v in pairs(blooddropList) do
+        if storedNear(BloodDrops[v], at, EVIDENCE_CLEAR) then
             TriggerClientEvent("evidence:client:RemoveBlooddrop", -1, v)
             BloodDrops[v] = nil
         end
     end
 end)
 
-RegisterNetEvent('evidence:server:AddBlooddropToInventory', function(bloodId, bloodInfo)
+--- the satchel entry of a collected piece, built from what the server stored
+local function dnaLabel(s)
+    return (tostring(s or ''):gsub('.', function(ch) return ('%02x'):format(ch:byte()) end))
+end
+
+RegisterNetEvent('evidence:server:AddBlooddropToInventory', function(bloodId)
     local src = source
     local Player = WCore.Functions.GetPlayer(src)
+    local drop = BloodDrops[bloodId]
+    if not Player or not storedNear(drop, pedCoords(src), EVIDENCE_REACH) then return end
+    local info = { label = locale('info.blood'), type = 'blood', dnalabel = dnaLabel(drop.dna), bloodtype = drop.bloodtype }
     if Player.Functions.RemoveItem("satchel", 1) then
-        if Player.Functions.AddItem("evidence_satchel", 1, false, bloodInfo) then
+        if Player.Functions.AddItem("evidence_satchel", 1, false, info) then
             TriggerClientEvent("evidence:client:RemoveBlooddrop", -1, bloodId)
             BloodDrops[bloodId] = nil
         end
@@ -937,11 +1042,14 @@ RegisterNetEvent('evidence:server:AddBlooddropToInventory', function(bloodId, bl
     end
 end)
 
-RegisterNetEvent('evidence:server:AddFingerprintToInventory', function(fingerId, fingerInfo)
+RegisterNetEvent('evidence:server:AddFingerprintToInventory', function(fingerId)
     local src = source
     local Player = WCore.Functions.GetPlayer(src)
+    local print_ = FingerDrops[fingerId]
+    if not Player or not storedNear(print_, pedCoords(src), EVIDENCE_REACH) then return end
+    local info = { label = locale('info.fingerprint'), type = 'fingerprint', fingerprint = print_.fingerprint }
     if Player.Functions.RemoveItem("satchel", 1) then
-        if Player.Functions.AddItem("evidence_satchel", 1, false, fingerInfo) then
+        if Player.Functions.AddItem("evidence_satchel", 1, false, info) then
             TriggerClientEvent("evidence:client:RemoveFingerprint", -1, fingerId)
             FingerDrops[fingerId] = nil
         end
@@ -953,18 +1061,21 @@ end)
 RegisterNetEvent('evidence:server:CreateCasing', function(weapon, coords)
     local src = source
     local Player = WCore.Functions.GetPlayer(src)
-    local casingId = CreateCasingId()
+    local c = Player and nearSender(src, coords, EVIDENCE_NEAR)
+    if not c or not evidenceAllowed(src, 'casing') then return end
     local weaponInfo = WCore.Shared.GetWeapons()[weapon] -- catalogue keyed by weapon hash
+    if not weaponInfo then return end
     local serieNumber = nil
-    if weaponInfo then
-        local weaponItem = Player.Functions.GetItemByName(weaponInfo["name"])
-        if weaponItem then
-            if weaponItem.info and weaponItem.info ~= "" then
-                serieNumber = weaponItem.info.serie
-            end
+    local weaponItem = Player.Functions.GetItemByName(weaponInfo["name"])
+    if weaponItem then
+        if weaponItem.info and weaponItem.info ~= "" then
+            serieNumber = weaponItem.info.serie
         end
     end
-    TriggerClientEvent("evidence:client:AddCasing", -1, casingId, weapon, coords, serieNumber)
+    local casingId = CreateCasingId()
+    Casings[casingId] = { weapon = weapon, serie = serieNumber, coords = c }
+    rememberEvidence('casing', Casings, casingId, "evidence:client:RemoveCasing")
+    TriggerClientEvent("evidence:client:AddCasing", -1, casingId, weapon, c, serieNumber)
 end)
 
 RegisterNetEvent('police:server:UpdateCurrentCops', function()
@@ -979,17 +1090,28 @@ RegisterNetEvent('police:server:UpdateCurrentCops', function()
 end)
 
 RegisterNetEvent('evidence:server:ClearCasings', function(casingList)
-    if casingList and next(casingList) then
-        for k, v in pairs(casingList) do
+    local src = source
+    if not onDutyPolice(src) or type(casingList) ~= 'table' then return end
+    local at = pedCoords(src)
+    for _, v in pairs(casingList) do
+        if storedNear(Casings[v], at, EVIDENCE_CLEAR) then
             TriggerClientEvent("evidence:client:RemoveCasing", -1, v)
             Casings[v] = nil
         end
     end
 end)
 
-RegisterNetEvent('evidence:server:AddCasingToInventory', function(casingId, casingInfo)
+RegisterNetEvent('evidence:server:AddCasingToInventory', function(casingId)
     local src = source
     local Player = WCore.Functions.GetPlayer(src)
+    local casing = Casings[casingId]
+    if not Player or not storedNear(casing, pedCoords(src), EVIDENCE_REACH) then return end
+    local weaponInfo = WCore.Shared.GetWeapons()[casing.weapon]
+    local ammoType = weaponInfo and weaponInfo.ammotype and weaponInfo.ammotype:lower() or nil
+    local ammoItem = ammoType and WCore.Shared.GetItem(ammoType) or nil
+    local casingInfo = { label = locale('info.casing'), type = 'casing',
+        ammolabel = (ammoItem and ammoItem.label) or locale('info.unknown'), ammotype = ammoType,
+        serie = casing.serie or locale('evidence.serial_not_visible') }
     if Player.Functions.RemoveItem("satchel", 1) then
         if Player.Functions.AddItem("evidence_satchel", 1, false, casingInfo) then
             TriggerClientEvent("evidence:client:RemoveCasing", -1, casingId)
