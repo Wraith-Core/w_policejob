@@ -9,13 +9,13 @@ Config.Keys = {
     -- station points
     duty = 'J',
     garage = 'R',
-    stash = 'E',
+    stash = 'H',      -- not E (E grabs the player next to you); J is duty in this same card
     armory = 'F',
     evidence = 'G',
     -- evidence lying on the ground (casings, blood, fingerprints)
     collect = 'G',
     -- the card that follows the closest player: lawman on duty
-    search = 'E',
+    search = 'Y',     -- not E (E grabs the player next to you); J is jail in this same card
     cuff = 'G',       -- held
     escort = 'H',
     wagon = 'B',      -- seat in / take out of the nearest wagon

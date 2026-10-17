@@ -2,6 +2,8 @@
 
 Law enforcement job for the Wraith Core (RedM) server.
 
+1.0.1: مفتاح الخزنة الشخصية في المركز صار H بدل E، ومفتاح التفتيش صار Y بدل E (لأن E يمسك اللاعب القريب، وJ مستعمل للدوام والسجن).
+
 ## Dependencies
 - w_lib (library: prompts, language, dialogs, blips, notifications, entities)
 - w_core (framework: players, jobs, commands)
