@@ -154,6 +154,13 @@ local function setOfflineMetadata(citizenid, values)
     end))
 end
 
+--- 1.0.2: XP through w_level's activity table (w_level/config/xp_rules.lua decides the amount and the caps;
+--- we only say what happened). Never yields, never throws.
+local function levelXp(src, activity, ctx, key)
+    if not src or GetResourceState('w_level') ~= 'started' then return end
+    pcall(function() exports.w_level:Award(src, activity, ctx, key) end)
+end
+
 --- Jail a character in play: the sentence and the record on his file, then his client drops the
 --- cuffs and escort and enters the prison.
 ---@param src integer the officer
@@ -163,12 +170,22 @@ local function jailInPlay(src, OtherPlayer, time)
     -- any finite number used to pass (1e300 months): a sentence has a ceiling now
     time = math.min(tonumber(time) or 0, tonumber(Config.Prison and Config.Prison.maxMonths) or 120)
     if time <= 0 then return end
+    -- 1.0.2: the level counts a fresh sentence only (a re-jail rewrites the time, it is not a new arrest)
+    local before = tonumber((OtherPlayer.PlayerData.metadata or {}).injail) or 0
     OtherPlayer.Functions.SetMetaData("injail", time)
     OtherPlayer.Functions.SetMetaData("criminalrecord", jailRecord())
     -- his client drops the cuffs on SendToJail; the server clears its own flag (see SetHandcuffStatus)
     OtherPlayer.Functions.SetMetaData("ishandcuffed", false)
     TriggerClientEvent("police:client:SendToJail", OtherPlayer.PlayerData.source, time)
     TriggerClientEvent('police:client:notify', src, 'info.sent_jail_for', 'inform', time)
+    -- 1.0.2: the level (w_level's table): the officer for the arrest (the same man counts once in a while),
+    -- the convict loses some by the length of the sentence. Never for jailing oneself.
+    local suspect = OtherPlayer.PlayerData.source
+    if before <= 0 and suspect ~= src then
+        local key = ('jail:%s:%d'):format(tostring(OtherPlayer.PlayerData.citizenid), os.time())
+        levelXp(src, 'police_jail', { target = suspect }, key)
+        levelXp(suspect, 'jailed', { count = math.floor(time) }, key)
+    end
 end
 
 -- Commands
@@ -687,6 +704,8 @@ RegisterNetEvent('police:server:BillPlayer', function(playerId, price)
             if not exports.w_centralbank:EnsureAccount('society:police', 'police', 'society') then return end
             if not exports.w_centralbank:Transfer('player:' .. OtherPlayer.PlayerData.citizenid .. ':bank', 'society:police', price, 'police-bill') then return end
             TriggerClientEvent('police:client:notify', OtherPlayer.PlayerData.source, 'info.fine_received', 'inform', price)
+            -- 1.0.2: the level (w_level's table): a fine paid, never one's own
+            if OtherPlayer.PlayerData.source ~= src then levelXp(src, 'police_fine', { target = OtherPlayer.PlayerData.source }) end
         end
     end
 end)
