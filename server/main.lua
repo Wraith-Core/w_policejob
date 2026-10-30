@@ -20,26 +20,30 @@ local Objects = {}
 
 -- Functions
 local function UpdateBlips()
-    local dutyPlayers = {}
-    local players = WCore.Functions.GetWPlayers()
-    for _, v in pairs(players) do
-        if v and (v.PlayerData.job.name == "police" or v.PlayerData.job.name == "doctor") and v.PlayerData.job.onduty then
-            local coords = GetEntityCoords(GetPlayerPed(v.PlayerData.source))
-            local heading = GetEntityHeading(GetPlayerPed(v.PlayerData.source))
-            dutyPlayers[#dutyPlayers+1] = {
-                source = v.PlayerData.source,
-                label = v.PlayerData.metadata["callsign"],
-                job = v.PlayerData.job.name,
-                location = {
-                    x = coords.x,
-                    y = coords.y,
-                    z = coords.z,
-                    w = heading
+    if Config.ShowBlips == false then return end
+    local byBucket, viewers = {}, {}
+    for _, player in pairs(WCore.Functions.GetWPlayers()) do
+        local data = player and player.PlayerData
+        local job = data and data.job
+        if job and (job.name == 'police' or job.name == 'doctor') and job.onduty then
+            local src = tonumber(data.source)
+            local ped = src and GetPlayerPed(src)
+            if ped and ped ~= 0 then
+                local bucket = GetPlayerRoutingBucket(src)
+                local coords = GetEntityCoords(ped)
+                byBucket[bucket] = byBucket[bucket] or {}
+                byBucket[bucket][#byBucket[bucket] + 1] = {
+                    source = src, label = (data.metadata or {}).callsign, job = job.name,
+                    location = { x = coords.x, y = coords.y, z = coords.z, w = GetEntityHeading(ped) },
                 }
-            }
+                viewers[#viewers + 1] = { source = src, bucket = bucket }
+            end
         end
     end
-    TriggerClientEvent("police:client:UpdateBlips", -1, dutyPlayers)
+    -- Location privacy is enforced before data leaves the server, including routing buckets.
+    for _, viewer in ipairs(viewers) do
+        TriggerClientEvent('police:client:UpdateBlips', viewer.source, byBucket[viewer.bucket] or {})
+    end
 end
 
 local function CreateBloodId()
@@ -456,14 +460,52 @@ end)
 
 -- Events
 -- `text` is a plain string, or { key = 'dict.key', args = { ... } } translated on every lawman's client
+-- Dispatch accepts a short sentence or a localized key with a small list of scalar arguments.
+local dispatchAt, dispatchWindow = {}, { at = 0, count = 0 }
+local function dispatchText(value)
+    if type(value) == 'string' then
+        if #value < 1 or #value > 500 or not utf8.len(value) then return nil end
+        local clean = value:gsub('%c', ' '):match('^%s*(.-)%s*$')
+        return clean ~= '' and clean or nil
+    end
+    if type(value) ~= 'table' or type(value.key) ~= 'string' or #value.key > 80
+        or not value.key:match('^[%w_%.]+$') then return nil end
+    local args, clean = value.args or {}, {}
+    if type(args) ~= 'table' or #args > 8 then return nil end
+    for i = 1, #args do if args[i] == nil then return nil end end
+    for k, arg in pairs(args) do
+        if type(k) ~= 'number' or k % 1 ~= 0 or k < 1 or k > #args then return nil end
+        if type(arg) == 'string' then
+            if #arg > 120 or not utf8.len(arg) then return nil end
+            clean[k] = arg:gsub('%c', ' ')
+        elseif type(arg) == 'number' and arg == arg and math.abs(arg) <= 1e9 then clean[k] = arg
+        else return nil end
+    end
+    local ok, rendered = pcall(locale, value.key, table.unpack(clean))
+    if not ok or rendered == value.key then return nil end
+    return { key = value.key, args = clean }
+end
+local function dispatchAllowed(src)
+    local now = GetGameTimer()
+    if dispatchAt[src] and now - dispatchAt[src] < 3000 then return false end
+    if now - dispatchWindow.at >= 1000 then dispatchWindow = { at = now, count = 0 } end
+    if dispatchWindow.count >= 10 then return false end
+    dispatchAt[src], dispatchWindow.count = now, dispatchWindow.count + 1
+    return true
+end
+AddEventHandler('playerDropped', function() dispatchAt[source] = nil end)
+
 RegisterNetEvent('police:server:policeAlert', function(text)
     local src = source
     local ped = GetPlayerPed(src)
-    local coords = GetEntityCoords(ped)
-    local players = WCore.Functions.GetWPlayers()
-    for k,v in pairs(players) do
-        if v.PlayerData.job.name == 'police' and v.PlayerData.job.onduty then
-            TriggerClientEvent('police:client:policeAlert', v.PlayerData.source, coords, text)
+    local clean = dispatchText(text)
+    if not ped or ped == 0 or not clean or not dispatchAllowed(src) then return end
+    local coords, bucket = GetEntityCoords(ped), GetPlayerRoutingBucket(src)
+    for _, player in pairs(WCore.Functions.GetWPlayers()) do
+        local data = player and player.PlayerData
+        local job = data and data.job
+        if job and job.name == 'police' and job.onduty and GetPlayerRoutingBucket(data.source) == bucket then
+            TriggerClientEvent('police:client:policeAlert', data.source, coords, clean)
         end
     end
 end)
