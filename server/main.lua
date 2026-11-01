@@ -917,7 +917,9 @@ RegisterNetEvent('police:server:RobPlayer', function(playerId)
     local victim = WCore.Functions.GetPlayer(tonumber(playerId))
     if not closePlayers(robber, victim) or robber.PlayerData.citizenid == victim.PlayerData.citizenid or not economyReady() then return end
     local state = victim.PlayerData.metadata or {}
-    if not state.ishandcuffed and not state.isdead and not state.inlaststand then return end
+    -- hands up = the victim's own w_lib X surrender (his state bag, his consent to give, as in w_inventory's search)
+    local handsUp = Player(victim.PlayerData.source).state.handsUp == true
+    if not (state.ishandcuffed or state.isdead or state.inlaststand or handsUp) then return end
     local amount = exports.w_centralbank:GetBalance(cashAccount(victim))
     if not amount or amount <= 0 or not exports.w_centralbank:Transfer(cashAccount(victim), cashAccount(robber), amount, 'player-robbery') then return end
     TriggerClientEvent('police:client:notify', victim.PlayerData.source, 'info.cash_robbed', 'inform', amount)

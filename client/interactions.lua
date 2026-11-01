@@ -100,7 +100,7 @@ local function RobTarget(player, playerPed)
         disableMouse = false,
         disableCombat = true,
     }, {}, {}, {}, function() -- Done
-        if #(GetEntityCoords(cache.ped) - GetEntityCoords(playerPed)) < 2.5 then
+        if #(GetEntityCoords(cache.ped) - GetEntityCoords(playerPed)) <= 1.8 then -- w_inventory opens another's bag within 1.8 m
             TriggerServerEvent("inventory:server:OpenInventory", "otherplayer", playerId)
             TriggerServerEvent("police:server:RobPlayer", playerId)
         else
