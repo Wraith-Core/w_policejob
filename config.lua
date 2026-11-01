@@ -197,6 +197,15 @@ Config.Prison = {
 -- standing next to a man could bill his whole bank account into the police society.
 Config.MaxFine = 5000
 
+-- 1.0.6 (2026-11-01, owner): the card's fine also needs a reason of at least `reasonMin` letters (it is
+-- written on the man's MDT record), and one officer may fine the same man once every `cooldownMinutes`.
+Config.Fine = { reasonMin = 3, cooldownMinutes = 5 }
+
+-- 1.0.6: a robbery (the civilian card on a man with his hands up, cuffed or down) took ALL the cash he
+-- carried. Now it takes `share` of it (0.5 = half) and never more than `max` dollars, and the same robber
+-- may rob the same man once every `cooldownMinutes`. Every robbery and its amount goes to w_logs.
+Config.Robbery = { share = 0.5, max = 500, cooldownMinutes = 30 }
+
 ---------------------------------------------
 
 WCore = w.framework:getCoreObject()

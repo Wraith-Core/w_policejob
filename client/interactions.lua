@@ -92,7 +92,10 @@ local function RobTarget(player, playerPed)
         WCore.Functions.Notify(locale("error.none_nearby"), 'error')
         return
     end
-    if not HasHandsUp(playerPed) then return end
+    if not HasHandsUp(playerPed) then
+        WCore.Functions.Notify(locale("error.rob_hands_up"), 'error')
+        return
+    end
     local playerId = GetPlayerServerId(player)
     WCore.Functions.Progressbar("robbing_player", locale("progressbar.robbing"), math.random(5000, 7000), false, true, {
         disableMovement = true,
@@ -133,11 +136,24 @@ local function BillTarget(player)
         return
     end
     local playerId = GetPlayerServerId(player)
-    local price = AskNumber(locale('info.bill'), locale('info.amount'))
-    if price and price > 0 then
-        TriggerServerEvent("police:server:BillPlayer", playerId, price)
-    else
+    -- 1.0.6: the amount and the reason together (the server checks both, and writes the reason on his MDT record)
+    local maxFine = tonumber(Config.MaxFine) or 5000
+    local input = w.inputDialog(locale('info.bill'), {
+        { type = 'number', label = locale('info.amount'), description = locale('info.fine_max_hint', maxFine), required = true, min = 1, max = maxFine },
+        { type = 'input', label = locale('info.fine_reason'), required = true, maxLength = 120 },
+    })
+    if not input then return end
+    local price = tonumber(input[1])
+    local reason = type(input[2]) == 'string' and input[2]:gsub('^%s+', ''):gsub('%s+$', '') or ''
+    local reasonMin = tonumber((Config.Fine or {}).reasonMin) or 1 -- the same minimum the server checks
+    if not price or price <= 0 then
         WCore.Functions.Notify(locale("error.amount_higher"), 'error')
+    elseif price > maxFine then
+        WCore.Functions.Notify(locale("error.fine_max", maxFine), 'error')
+    elseif (utf8.len(reason) or #reason) < reasonMin then
+        WCore.Functions.Notify(locale("error.fine_reason", reasonMin), 'error')
+    else
+        TriggerServerEvent("police:server:BillPlayer", playerId, price, reason)
     end
 end
 

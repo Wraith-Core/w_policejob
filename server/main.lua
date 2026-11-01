@@ -363,18 +363,23 @@ end)
 
 WCore.Functions.CreateUseableItem("moneybag", function(source, item)
     local player = WCore.Functions.GetPlayer(source)
-    if not player or not economyReady() then return end
+    if not player then return end
+    if not economyReady() then return w.notify(source, { description = 'error.economy_down', type = 'error' }) end
     local bag = player.Functions.GetItemBySlot(item.slot)
     local info = bag and bag.info
     -- Legacy or administrator-created cash metadata is not a redeemable banknote.
     local id = type(info) == 'table' and info.economyClaim
-    if not bag or bag.name ~= 'moneybag' or type(id) ~= 'string' or not id:match('^moneybag:%x+:cash$') then return end
+    if not bag or bag.name ~= 'moneybag' or type(id) ~= 'string' or not id:match('^moneybag:%x+:cash$') then
+        return w.notify(source, { description = 'error.moneybag_empty', type = 'error' })
+    end
     local amount = exports.w_centralbank:GetBalance(id)
-    if not amount or amount <= 0 then return end
+    if not amount or amount <= 0 then return w.notify(source, { description = 'error.moneybag_empty', type = 'error' }) end
     if not player.Functions.RemoveItem('moneybag', 1, item.slot) then return end
     if not exports.w_centralbank:Transfer(id, cashAccount(player), amount, 'moneybag-redeemed', 'redeem:' .. id) then
         player.Functions.AddItem('moneybag', 1, item.slot, info)
+        return w.notify(source, { description = 'error.economy_down', type = 'error' })
     end
+    TriggerClientEvent('police:client:notify', source, 'info.moneybag_redeemed', 'success', amount)
 end)
 
 WCore.Functions.CreateUseableItem("evidence_satchel", function(source, item)
@@ -517,8 +522,8 @@ end)
 -- bucket, read anybody's cash. So the events below check what the server itself knows: the man is
 -- in the game and is not the sender, both stand in the same routing bucket and within reach, the
 -- sender has the job on duty (or the handcuffs) the action needs, and the man is cuffed or down
--- where the action needs it. The card and the commands pass every check as before; the jail, fine,
--- seizure and robbery events have their own checks (closePlayers) above and below.
+-- where the action needs it. The card and the commands pass every check as before; since 1.0.6 the jail,
+-- fine and seizure events use the same checks, the robbery keeps its own (closePlayers) below.
 
 --- metres between the two, measured on the server. The client picks within 2.5 m; the server's
 --- positions trail the clients' a little, so it allows the same 5 m as the jail and fine checks.
@@ -732,24 +737,72 @@ RegisterNetEvent('police:server:PutPlayerInVehicle', function(playerId)
     end
 end)
 
-RegisterNetEvent('police:server:BillPlayer', function(playerId, price)
-    local src = source
-    local Player = WCore.Functions.GetPlayer(src)
-    -- a number only: GetPlayer reads a string as a license / identifier
-    local OtherPlayer = tonumber(playerId) and WCore.Functions.GetPlayer(tonumber(playerId)) or nil
-    -- on duty (an off-duty lawman billed a man's whole bank), and a ceiling on the fine
-    if Player and onDutyAs(Player, 'police') then
-        if OtherPlayer then
-            price = tonumber(price)
-            if not closePlayers(Player, OtherPlayer) or not price or price ~= price or price <= 0 or price == math.huge or not economyReady() then return end
-            price = math.min(price, tonumber(Config.MaxFine) or 5000)
-            if not exports.w_centralbank:EnsureAccount('society:police', 'police', 'society') then return end
-            if not exports.w_centralbank:Transfer('player:' .. OtherPlayer.PlayerData.citizenid .. ':bank', 'society:police', price, 'police-bill') then return end
-            TriggerClientEvent('police:client:notify', OtherPlayer.PlayerData.source, 'info.fine_received', 'inform', price)
-            -- 1.0.2: the level (w_level's table): a fine paid, never one's own
-            if OtherPlayer.PlayerData.source ~= src then levelXp(src, 'police_fine', { target = OtherPlayer.PlayerData.source }) end
-        end
+-- ── cooldowns per pair (1.0.6) ───────────────────────────────────────────────────────────
+-- '<actor citizenid>><target citizenid>' -> os.time() of the last fine / robbery, so one officer cannot
+-- fine the same man again and again (Config.Fine) and one robber cannot empty the same man (Config.Robbery).
+local lastFine, lastRobbery = {}, {}
+
+--- Minutes left on the pair's cooldown (0 = free). Old pairs are dropped now and then.
+---@param book table lastFine | lastRobbery
+---@param key string
+---@param minutes number
+---@return integer
+local function cooldownLeft(book, key, minutes)
+    local now, span = os.time(), (tonumber(minutes) or 0) * 60
+    if next(book) and math.random(1, 50) == 1 then
+        for k, at in pairs(book) do if now - at >= span then book[k] = nil end end
     end
+    local at = book[key]
+    if not at or now - at >= span then return 0 end
+    return math.max(1, math.ceil((span - (now - at)) / 60))
+end
+
+--- The card's fine (key K): on duty, the man next to the officer, an amount up to Config.MaxFine and a
+--- reason, once per officer and man every Config.Fine.cooldownMinutes. It goes on the man's MDT record.
+RegisterNetEvent('police:server:BillPlayer', function(playerId, price, reason)
+    local src = source
+    local Player, OtherPlayer = nearTarget(src, playerId, 'BillPlayer')
+    if not Player then return end
+    -- on duty (an off-duty lawman billed a man's whole bank), and a ceiling on the fine
+    if not onDutyAs(Player, 'police') then
+        return refuseAct(src, 'BillPlayer', 'not a lawman on duty', 'error.on_duty_police_only')
+    end
+    local cfg = Config.Fine or {}
+    local maxFine = tonumber(Config.MaxFine) or 5000
+    price = tonumber(price)
+    if not price or price ~= price or price <= 0 or price == math.huge then
+        return w.notify(src, { description = 'error.amount_higher', type = 'error' })
+    end
+    price = math.floor(price)
+    if price < 1 then return w.notify(src, { description = 'error.amount_higher', type = 'error' }) end
+    if price > maxFine then
+        return TriggerClientEvent('police:client:notify', src, 'error.fine_max', 'error', maxFine)
+    end
+    reason = type(reason) == 'string' and reason:gsub('^%s+', ''):gsub('%s+$', ''):sub(1, 200) or ''
+    local reasonMin = tonumber(cfg.reasonMin) or 1
+    if (utf8.len(reason) or #reason) < reasonMin then
+        return TriggerClientEvent('police:client:notify', src, 'error.fine_reason', 'error', reasonMin)
+    end
+    local pair = Player.PlayerData.citizenid .. '>' .. OtherPlayer.PlayerData.citizenid
+    local wait = cooldownLeft(lastFine, pair, cfg.cooldownMinutes)
+    if wait > 0 then
+        return TriggerClientEvent('police:client:notify', src, 'error.fine_cooldown', 'error', wait)
+    end
+    if not economyReady() or not exports.w_centralbank:EnsureAccount('society:police', 'police', 'society') then
+        return w.notify(src, { description = 'error.economy_down', type = 'error' })
+    end
+    if not exports.w_centralbank:Transfer('player:' .. OtherPlayer.PlayerData.citizenid .. ':bank', 'society:police', price, 'police-bill') then
+        return w.notify(src, { description = 'error.fine_no_money', type = 'error' })
+    end
+    lastFine[pair] = os.time()
+    -- the man's MDT record (w_mdt 5.1.1); an older w_mdt has no such export and the fine still stands
+    if GetResourceState('w_mdt') == 'started' then
+        pcall(function() exports.w_mdt:RecordCardFine(src, OtherPlayer.PlayerData.citizenid, price, reason) end)
+    end
+    TriggerClientEvent('police:client:notify', OtherPlayer.PlayerData.source, 'info.fine_received', 'inform', price)
+    TriggerClientEvent('police:client:notify', src, 'info.fine_taken', 'success', price)
+    -- 1.0.2: the level (w_level's table): a fine paid, never one's own (nearTarget refuses oneself)
+    levelXp(src, 'police_fine', { target = OtherPlayer.PlayerData.source })
 end)
 
 -- The walk-up card's jail (client/interactions.lua JailTarget: the suspect in front of the officer).
@@ -757,16 +810,16 @@ end)
 -- officer: the /jail command no longer comes through here, and a remote id is refused.
 RegisterNetEvent('police:server:JailPlayer', function(playerId, time)
     local src = source
-    local Player = WCore.Functions.GetPlayer(src)
-    local OtherPlayer = WCore.Functions.GetPlayer(tonumber(playerId))
     time = tonumber(time)
-    if not time or time ~= time or time <= 0 or time == math.huge then return end
-
-    if Player and onDutyAs(Player, 'police') then
-        if OtherPlayer and closePlayers(Player, OtherPlayer) then
-            jailInPlay(src, OtherPlayer, time)
-        end
+    if not time or time ~= time or time <= 0 or time == math.huge then
+        return w.notify(src, { description = 'error.time_higher', type = 'error' })
     end
+    local Player, OtherPlayer = nearTarget(src, playerId, 'JailPlayer')
+    if not Player then return end
+    if not onDutyAs(Player, 'police') then
+        return refuseAct(src, 'JailPlayer', 'not a lawman on duty', 'error.on_duty_police_only')
+    end
+    jailInPlay(src, OtherPlayer, time)
 end)
 
 --- A dead man's respawn at the hospital: w_medic puts him in a bed (hospital:server:
@@ -895,35 +948,66 @@ RegisterNetEvent('police:server:SearchPlayer', function(playerId)
 end)
 
 RegisterNetEvent('police:server:SeizeCash', function(playerId)
-    local officer = WCore.Functions.GetPlayer(source)
-    local victim = WCore.Functions.GetPlayer(tonumber(playerId))
-    if not closePlayers(officer, victim) or officer.PlayerData.citizenid == victim.PlayerData.citizenid or officer.PlayerData.job.name ~= 'police'
-        or not officer.PlayerData.job.onduty or not economyReady() then return end
+    local src = source
+    local officer, victim = nearTarget(src, playerId, 'SeizeCash')
+    if not officer or officer.PlayerData.citizenid == victim.PlayerData.citizenid then return end
+    if not onDutyAs(officer, 'police') then
+        return refuseAct(src, 'SeizeCash', 'not a lawman on duty', 'error.on_duty_police_only')
+    end
+    if not economyReady() then return w.notify(src, { description = 'error.economy_down', type = 'error' }) end
     local amount = exports.w_centralbank:GetBalance(cashAccount(victim))
-    if not amount or amount <= 0 then return end
+    if not amount or amount <= 0 then return w.notify(src, { description = 'error.seize_no_cash', type = 'error' }) end
     local token = ('%08x%08x%08x%08x'):format(math.random(0,0x7fffffff),math.random(0,0x7fffffff),math.random(0,0x7fffffff),math.random(0,0x7fffffff))
     local claim = 'moneybag:' .. token .. ':cash'
-    if not exports.w_centralbank:EnsureAccount(claim, officer.PlayerData.citizenid, 'bearer-cash') then return end
-    if not exports.w_centralbank:Transfer(cashAccount(victim), claim, amount, 'police-cash-seized') then return end
+    if not exports.w_centralbank:EnsureAccount(claim, officer.PlayerData.citizenid, 'bearer-cash')
+        or not exports.w_centralbank:Transfer(cashAccount(victim), claim, amount, 'police-cash-seized') then
+        return w.notify(src, { description = 'error.economy_down', type = 'error' })
+    end
     if not officer.Functions.AddItem('moneybag', 1, false, {cash=amount, economyClaim=claim}) then
         exports.w_centralbank:Transfer(claim, cashAccount(victim), amount, 'seizure-cancelled')
-        return
+        return w.notify(src, { description = 'error.seize_no_room', type = 'error' })
     end
     w.notify(victim.PlayerData.source, {description='info.cash_confiscated', type='inform'})
+    TriggerClientEvent('police:client:notify', src, 'info.cash_seized', 'success', amount)
 end)
 
 RegisterNetEvent('police:server:RobPlayer', function(playerId)
-    local robber = WCore.Functions.GetPlayer(source)
+    local src = source
+    local robber = WCore.Functions.GetPlayer(src)
     local victim = WCore.Functions.GetPlayer(tonumber(playerId))
-    if not closePlayers(robber, victim) or robber.PlayerData.citizenid == victim.PlayerData.citizenid or not economyReady() then return end
+    if not closePlayers(robber, victim) or robber.PlayerData.citizenid == victim.PlayerData.citizenid then
+        return w.notify(src, { description = 'error.none_nearby', type = 'error' })
+    end
+    if not economyReady() then return w.notify(src, { description = 'error.economy_down', type = 'error' }) end
     local state = victim.PlayerData.metadata or {}
     -- hands up = the victim's own w_lib X surrender (his state bag, his consent to give, as in w_inventory's search)
     local handsUp = Player(victim.PlayerData.source).state.handsUp == true
-    if not (state.ishandcuffed or state.isdead or state.inlaststand or handsUp) then return end
-    local amount = exports.w_centralbank:GetBalance(cashAccount(victim))
-    if not amount or amount <= 0 or not exports.w_centralbank:Transfer(cashAccount(victim), cashAccount(robber), amount, 'player-robbery') then return end
+    if not (state.ishandcuffed or state.isdead or state.inlaststand or handsUp) then
+        return w.notify(src, { description = 'error.rob_not_helpless', type = 'error' })
+    end
+    -- 1.0.6: one robber, one man: once every Config.Robbery.cooldownMinutes, and only a share of his cash
+    local cfg = Config.Robbery or {}
+    local pair = robber.PlayerData.citizenid .. '>' .. victim.PlayerData.citizenid
+    local wait = cooldownLeft(lastRobbery, pair, cfg.cooldownMinutes)
+    if wait > 0 then
+        return TriggerClientEvent('police:client:notify', src, 'error.rob_cooldown', 'error', wait)
+    end
+    local balance = exports.w_centralbank:GetBalance(cashAccount(victim))
+    if not balance or balance <= 0 then return w.notify(src, { description = 'error.rob_no_cash', type = 'error' }) end
+    local share = math.min(math.max(tonumber(cfg.share) or 0.5, 0), 1)
+    -- whole cents (the central bank keeps cents), never above the cap
+    local amount = math.min(math.floor(balance * share * 100) / 100, tonumber(cfg.max) or 500)
+    if amount <= 0 then return w.notify(src, { description = 'error.rob_no_cash', type = 'error' }) end
+    if not exports.w_centralbank:Transfer(cashAccount(victim), cashAccount(robber), amount, 'player-robbery') then
+        return w.notify(src, { description = 'error.rob_no_cash', type = 'error' })
+    end
+    lastRobbery[pair] = os.time()
     TriggerClientEvent('police:client:notify', victim.PlayerData.source, 'info.cash_robbed', 'inform', amount)
     TriggerClientEvent('police:client:notify', robber.PlayerData.source, 'info.stolen_money', 'inform', amount)
+    -- the amount in w_logs' robbery room: who robbed whom, how much of how much
+    TriggerEvent('w_log:server:CreateLog', 'robbery', 'Player robbed', 'red',
+        ('%s [%s] robbed $%.2f of $%.2f cash from %s [%s]'):format(GetPlayerName(src) or '?', robber.PlayerData.citizenid,
+            amount, balance, GetPlayerName(victim.PlayerData.source) or '?', victim.PlayerData.citizenid))
 end)
 
 -- ── evidence and police objects (audit 2026-10-18) ──────────────────────────────────────────
