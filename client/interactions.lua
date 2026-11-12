@@ -1,5 +1,37 @@
 -- Variables
 local isEscorting = false
+local isCarried = false   -- this player is on another's shoulder (police:client:GetKidnappedTarget)
+
+-- The game's own carry of a living (injured) person, read from data/ai/carryconfigdata.meta
+-- INJURED_CARRIABLE_HUMAN_PED_CARRIED_BY_HUMAN_DATA_SET (CodeX, 2026-11-12): attached to the carrier's
+-- ID_PH_L_CARRIABLE_SHOULDER with no offset and no rotation; the carried one holds
+-- clipset@mech_carry_ped@injured@carried@human (dictionary mech_carry_ped@injured@carried@human, a standalone
+-- .ycd: carriedbyhuman_exp 4.4 s), the carrier's left arm grips him with GRIP_LT_ARM of the same set (an arm-only
+-- clip). The same recipe carries sheep / goats / pigs in w_farming/livestock/client/carry.lua.
+local CARRY <const> = {
+    dict = 'mech_carry_ped@injured@carried@human',
+    carried = 'carriedbyhuman_exp',
+    grip = 'grip_lt_arm',
+    bone = 'PH_L_CarriableShoulder',
+}
+
+local function LoadCarryDict()
+    if HasAnimDictLoaded(CARRY.dict) then return true end
+    RequestAnimDict(CARRY.dict)
+    local untilAt = GetGameTimer() + 3000
+    while not HasAnimDictLoaded(CARRY.dict) and GetGameTimer() < untilAt do Wait(10) end
+    return HasAnimDictLoaded(CARRY.dict)
+end
+
+local function PlayCarried(ped)
+    -- 1 = loop, full body
+    TaskPlayAnim(ped, CARRY.dict, CARRY.carried, 8.0, -8.0, -1, 1, 0.0, false, false, false)
+end
+
+local function PlayGrip(ped)
+    -- 31 = loop + upper body + secondary: the carrier walks as he likes, his left arm keeps hold
+    TaskPlayAnim(ped, CARRY.dict, CARRY.grip, 4.0, -4.0, -1, 31, 0.0, false, false, false)
+end
 -- cuffType (client/main.lua) states
 CUFF_NONE = 'none'
 CUFF_HARD = 'hard'
@@ -217,8 +249,18 @@ local function ZoomedOn(ped)
         local ok, value = pcall(fn, ...)
         return ok and (value == true or value == 1)
     end
-    return yes('IsPlayerFreeAimingAtEntity', player, ped)
-        or yes('IsPlayerTargettingEntity', player, ped, false)
+    if yes('IsPlayerFreeAimingAtEntity', player, ped) or yes('IsPlayerTargettingEntity', player, ped, false) then
+        return true
+    end
+    -- 2026-11-12: the unarmed lock-on (right mouse with no weapon in hand) is the game's free focus, which
+    -- neither native above answers: the law card did not come up on it, and w_creators' talk card (greet /
+    -- antagonize) was shown alone, its G even on the cuff key. The focused entity is read like
+    -- w_creators/client/voice/speak.lua reads it.
+    if yes('IsPlayerFreeFocusing', player) and type(GetPlayerTargetEntity) == 'function' then
+        local ok, found, target = pcall(GetPlayerTargetEntity, player)
+        return ok and (found == true or found == 1) and target == ped
+    end
+    return false
 end
 
 local Target = nil   -- { id, ped, serverId, lawman, rec, labels = {}, visible = {} }
@@ -285,10 +327,21 @@ local function CardState(t)
     return labels, visible
 end
 
+-- 2026-11-12: while this card is on the screen, LocalPlayer.state['w:personCard'] is true (this client only,
+-- not replicated). w_creators/client/voice/speak.lua leaves its talk card (greet / antagonize / melee / emote,
+-- R G F 1) down meanwhile: w_lib shows one prompt card at a time, and its G is the cuff key.
+local PERSON_CARD <const> = 'w:personCard'
+local function SetPersonCard(on)
+    if (LocalPlayer.state[PERSON_CARD] == true) ~= on then
+        LocalPlayer.state:set(PERSON_CARD, on, false)
+    end
+end
+
 local function DropTarget()
     if not Target then return end
     Target.rec.remove()
     Target = nil
+    SetPersonCard(false)
 end
 
 local function BuildTarget(id, ped, lawman)
@@ -297,6 +350,8 @@ local function BuildTarget(id, ped, lawman)
         distance = TARGET_REACH,
         title = lawman and locale('prompt.suspect') or false,
         prompts = lawman and LawmanPrompts() or CivilianPrompts(),
+        onEnter = function() SetPersonCard(true) end,
+        onExit = function() SetPersonCard(false) end,
         canInteract = function()
             if not CanAct() then return false end
             if lawman then return ZoomedOn(ped) end
@@ -404,6 +459,7 @@ RegisterNetEvent('police:client:PutInVehicle', function()
         if vehicle and DoesEntityExist(vehicle) then
             for i = GetVehicleMaxNumberOfPassengers(vehicle) - 1, 0, -1 do
                 if IsVehicleSeatFree(vehicle, i) then
+                    isCarried = false
                     SetEscorted(false)
                     TriggerEvent('hospital:client:isEscorted', isEscorted)
                     ClearPedTasks(ped)
@@ -485,10 +541,13 @@ RegisterNetEvent('police:client:GetEscorted', function(playerId)
                 SetEscorted(true)
                 draggerId = playerId
                 local dragger = GetPlayerPed(GetPlayerFromServerId(playerId))
-                local bone = GetEntityBoneIndexByName(dragger, 'SKEL_Pelvis')
-                if bone == -1 then bone = 0 end
-                SetEntityCoords(ped, GetOffsetFromEntityInWorldCoords(dragger, 0.0, 0.45, 0.0))
-                AttachEntityToEntity(ped, dragger, bone, 0.45, 0.45, 0.0, 0.0, 0.0, 0.0, false, false, false, false, 2, true)
+                -- 2026-11-12: on the officer's root (bone 0), not SKEL_Pelvis. The pelvis bone of the game's
+                -- skeleton is turned 90 degrees about its Y axis from the ped (bind pose rotation 0, 0.707, 0,
+                -- 0.707 in meta_base_mp_male.yft, the same in every carry clip), so a zero rotation on it laid
+                -- the suspect on his side at the officer's waist. The root turns with the ped: he stands upright,
+                -- in front and to the right of the officer, facing the same way.
+                SetEntityCoords(ped, GetOffsetFromEntityInWorldCoords(dragger, 0.45, 0.45, 0.0))
+                AttachEntityToEntity(ped, dragger, 0, 0.45, 0.45, 0.0, 0.0, 0.0, 0.0, false, false, false, false, 2, true)
             else
                 SetEscorted(false)
                 DetachEntity(ped, true, false)
@@ -499,6 +558,7 @@ RegisterNetEvent('police:client:GetEscorted', function(playerId)
 end)
 
 RegisterNetEvent('police:client:DeEscort', function()
+    isCarried = false
     SetEscorted(false)
     TriggerEvent('hospital:client:isEscorted', isEscorted)
     DetachEntity(cache.ped, true, false)
@@ -512,9 +572,21 @@ RegisterNetEvent('police:client:GetKidnappedTarget', function(playerId)
                 SetEscorted(true)
                 draggerId = playerId
                 local dragger = GetPlayerPed(GetPlayerFromServerId(playerId))
-                AttachEntityToEntity(ped, dragger, 0, 0.27, 0.15, 0.63, 0.5, 0.5, 0.0, false, false, false, false, 2, false)
+                -- 2026-11-12: the game's shoulder carry (CARRY above) instead of a bare attach with no clip,
+                -- which hung the man upright at the carrier's waist. Without the clip / bone the old attach stays.
+                local bone = GetEntityBoneIndexByName(dragger, CARRY.bone)
+                if bone and bone >= 0 and LoadCarryDict() then
+                    isCarried = true
+                    ClearPedTasksImmediately(ped)
+                    SetEnableHandcuffs(ped, false, false) -- the cuffed arms pose would fight the carried clip
+                    AttachEntityToEntity(ped, dragger, bone, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false, false, false, false, 0, true, false, false)
+                    PlayCarried(ped)
+                else
+                    AttachEntityToEntity(ped, dragger, 0, 0.27, 0.15, 0.63, 0.5, 0.5, 0.0, false, false, false, false, 2, false)
+                end
             else
                 SetEscorted(false)
+                isCarried = false
                 DetachEntity(ped, true, false)
                 ClearPedTasksImmediately(ped)
             end
@@ -528,6 +600,7 @@ RegisterNetEvent('police:client:GetKidnappedDragger', function(playerId)
         if not isEscorting then
             draggerId = playerId
             isEscorting = true
+            if LoadCarryDict() then PlayGrip(cache.ped) end
         else
             local dragger = cache.ped
             ClearPedSecondaryTask(dragger)
@@ -561,6 +634,7 @@ RegisterNetEvent('police:client:GetCuffed', function(playerId, isSoftcuff, wante
         end
     else
         SetHandcuffed(false)
+        isCarried = false
         SetEscorted(false)
         TriggerEvent('hospital:client:isEscorted', isEscorted)
         DetachEntity(ped, true, false)
@@ -608,7 +682,19 @@ CreateThread(function()
             DisableControlAction(0, 0xE30CD707, true) -- R
         end
 
-        if isHandcuffed and cuffType ~= CUFF_NONE then
+        if isCarried and not isEscorted then isCarried = false end
+        if isCarried then
+            if not IsEntityPlayingAnim(ped, CARRY.dict, CARRY.carried, 3) and HasAnimDictLoaded(CARRY.dict) then
+                PlayCarried(ped)
+            end
+        end
+        if isEscorting and HasAnimDictLoaded(CARRY.dict)
+            and not IsEntityPlayingAnim(ped, CARRY.dict, CARRY.grip, 3) and draggerId
+            and IsEntityAttachedToEntity(GetPlayerPed(GetPlayerFromServerId(draggerId)), ped) then
+            PlayGrip(ped)
+        end
+
+        if isHandcuffed and cuffType ~= CUFF_NONE and not isCarried then
             SetEnableHandcuffs(ped, true, false)
             DisablePlayerFiring(cache.playerId, true)
             SetPedCanPlayGestureAnims(ped, false)

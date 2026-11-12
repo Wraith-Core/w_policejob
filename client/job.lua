@@ -235,9 +235,10 @@ RegisterNetEvent('police:client:EvidenceStashDrawer', function(k)
 end)
 
 -- Toggle Duty in an event.
+-- 2026-11-12: the duty is the server's (w_core server/events.lua answers WCore:Client:SetDuty, client/main.lua
+-- takes it). Flipping it here as well drifted the moment the two disagreed once (a job set while on duty, see
+-- OnJobUpdate): from then on the law card came up only while the station said off duty.
 RegisterNetEvent('w_policejob:ToggleDuty', function()
-    onDuty = not onDuty
-    TriggerServerEvent("police:server:UpdateCurrentCops")
     TriggerServerEvent("WCore:ToggleDuty")
 end)
 

@@ -101,12 +101,9 @@ RegisterNetEvent('WCore:Client:OnPlayerUnload', function()
 end)
 
 RegisterNetEvent('WCore:Client:OnJobUpdate', function(JobInfo)
-    if JobInfo.name == "police" and PlayerJob.name ~= "police" then
+    local becomesLawman = JobInfo.name == "police" and PlayerJob.name ~= "police"
+    if becomesLawman then
         CreatePrompts()
-        if JobInfo.onduty then
-            TriggerServerEvent("WCore:ToggleDuty")
-            onDuty = false
-        end
     end
 
     if JobInfo.name ~= "police" then
@@ -114,7 +111,21 @@ RegisterNetEvent('WCore:Client:OnJobUpdate', function(JobInfo)
         RemovePrompts()
     end
     PlayerJob = JobInfo
-    onDuty = JobInfo.onduty
+    onDuty = JobInfo.onduty == true
+    -- a new lawman starts off duty (he signs in at the station). 2026-11-12: this used to set onDuty = false
+    -- BEFORE the line above put it back to true, so the client said on duty while the server was off, and every
+    -- station toggle after that was inverted. The server's answer (WCore:Client:SetDuty) sets it now.
+    if becomesLawman and onDuty then
+        onDuty = false
+        TriggerServerEvent("WCore:ToggleDuty")
+    end
+end)
+
+-- The server's duty (w_core server/events.lua, after WCore:ToggleDuty): the one source of onDuty.
+RegisterNetEvent('WCore:Client:SetDuty', function(duty)
+    onDuty = duty == true
+    if PlayerJob then PlayerJob.onduty = onDuty end
+    TriggerServerEvent("police:server:UpdateCurrentCops")
 end)
 
 -- Server-side notices arrive as dictionary keys + format args and are translated here,
