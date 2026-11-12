@@ -7,8 +7,8 @@
 
 local jailed = false
 
---- The ground under (x, y), searched from a little above the stored height: the stored z may sit
---- a few metres off on this map. nil when the collision did not load in time.
+--- The ground under (x, y), searched from just above the stored height: the stored z may sit a
+--- little off on this map. nil when the collision did not load in time or no ground is near.
 local function groundAt(x, y, z)
     local ped = cache.ped
     RequestCollisionAtCoord(x, y, z)
@@ -17,8 +17,11 @@ local function groundAt(x, y, z)
         RequestCollisionAtCoord(x, y, z)
         Wait(0)
     end
-    local found, groundZ = GetGroundZFor_3dCoord(x, y, z + 25.0, false)
-    if found then return groundZ end
+    -- searched from just above the point: from 25 m up it found the roof of the building beside it
+    -- (the release point landed men on the Saint Denis HQ roof). A ground far from the stored height is
+    -- not the ground we meant (a roof, a bridge): keep the stored height then.
+    local found, groundZ = GetGroundZFor_3dCoord(x, y, z + 2.0, false)
+    if found and math.abs(groundZ - z) <= 3.0 then return groundZ end
     return nil
 end
 
