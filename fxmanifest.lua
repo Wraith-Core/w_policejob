@@ -3,7 +3,7 @@ game 'rdr3'
 rdr3_warning 'I acknowledge that this is a prerelease build of RedM, and I am aware my resources *will* become incompatible once RedM ships.'
 
 description 'w_PoliceJob'
-version '1.0.8'
+version '1.0.9'
 
 shared_scripts {
     '@w_lib/init.lua', -- must load before anything that touches w / lib / cache
