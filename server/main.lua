@@ -935,6 +935,17 @@ CreateThread(function()
     end
 end)
 
+--- Open another man's bag for `src` (the search, the robbery). 2026-11-13: the clients sent the QBCore
+--- event 'inventory:server:OpenInventory', which w_inventory answers only on its RSG / QBR bridges -- on
+--- w_core the bag never opened. Its own open path still decides (the man is down, cuffed or holds his
+--- hands up, within arm's reach: canSearchPlayer in w_inventory/server.lua).
+---@param src integer
+---@param target integer
+local function openBagOf(src, target)
+    if GetResourceState('w_inventory') ~= 'started' then return end
+    TriggerClientEvent('w_inventory:openInventory', src, 'player', target)
+end
+
 -- The lawman card's search (on duty): the cash he finds, and the man is told he is searched.
 RegisterNetEvent('police:server:SearchPlayer', function(playerId)
     local src = source
@@ -943,6 +954,7 @@ RegisterNetEvent('police:server:SearchPlayer', function(playerId)
     if not onDutyAs(Player, 'police') then
         return refuseAct(src, 'SearchPlayer', 'not a lawman on duty', 'error.on_duty_police_only')
     end
+    openBagOf(src, SearchedPlayer.PlayerData.source)
     TriggerClientEvent('police:client:notify', src, 'info.cash_found', 'inform', SearchedPlayer.PlayerData.money["cash"])
     w.notify(SearchedPlayer.PlayerData.source, { description = 'info.being_searched', type = 'inform' })
 end)
@@ -985,6 +997,7 @@ RegisterNetEvent('police:server:RobPlayer', function(playerId)
     if not (state.ishandcuffed or state.isdead or state.inlaststand or handsUp) then
         return w.notify(src, { description = 'error.rob_not_helpless', type = 'error' })
     end
+    openBagOf(src, victim.PlayerData.source)
     -- 1.0.6: one robber, one man: once every Config.Robbery.cooldownMinutes, and only a share of his cash
     local cfg = Config.Robbery or {}
     local pair = robber.PlayerData.citizenid .. '>' .. victim.PlayerData.citizenid
@@ -1008,6 +1021,106 @@ RegisterNetEvent('police:server:RobPlayer', function(playerId)
     TriggerEvent('w_log:server:CreateLog', 'robbery', 'Player robbed', 'red',
         ('%s [%s] robbed $%.2f of $%.2f cash from %s [%s]'):format(GetPlayerName(src) or '?', robber.PlayerData.citizenid,
             amount, balance, GetPlayerName(victim.PlayerData.source) or '?', victim.PlayerData.citizenid))
+end)
+
+-- ── the station lockers: personal stash, evidence drawers, armory (2026-11-13) ─────────────────
+-- All three sent 'inventory:server:OpenInventory' from the client (see openBagOf): none of them ever
+-- opened on w_core. The server opens them now, after it has checked the job and that the lawman
+-- stands at that point of the office. The ids did not change ('policestash_<citizenid>',
+-- '<office> | Drawer <n>'), so a locker keeps its contents.
+local LOCKER_REACH = 4.0                    -- metres from the point (merged prompt cards reach a bit further)
+local ARMORY_SHOP = 'w_policejob_armory'    -- the bag's shop type; one shop per armory point
+local stashReady = {}                       -- [stash id] = registered with the bag
+local armoryReady = false
+
+AddEventHandler('onResourceStart', function(name)
+    -- a restarted bag forgets what other resources registered with it
+    if name == 'w_inventory' or name == 'w_lib' then
+        stashReady, armoryReady = {}, false
+    end
+end)
+
+--- The lawman `src` (job police) standing at a point of Config.Locations[kind]: that point's index.
+---@param src integer
+---@param kind string 'stash' | 'evidence' | 'armory'
+---@param index integer|nil this point only
+---@return table|nil player, integer|nil index
+local function atStation(src, kind, index)
+    local Player = WCore.Functions.GetPlayer(src)
+    if not Player or (Player.PlayerData.job or {}).name ~= 'police' then
+        return refuseAct(src, kind, 'not a lawman', 'error.law_only')
+    end
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then return end
+    local pos = GetEntityCoords(ped)
+    for k, p in pairs(Config.Locations[kind] or {}) do
+        if (index == nil or k == index) and #(pos - vector3(p.x, p.y, p.z)) <= LOCKER_REACH then
+            return Player, k
+        end
+    end
+    return refuseAct(src, kind, 'not at the point')
+end
+
+local function openLocker(src, id, label, slots, maxWeight)
+    if not stashReady[id] then
+        local ok, done = pcall(function()
+            return exports.w_lib:InvRegisterStash(id, label, slots, maxWeight, { groups = { police = 0 } })
+        end)
+        stashReady[id] = ok and done ~= false
+    end
+    pcall(function() exports.w_lib:InvOpenStash(src, id) end)
+end
+
+RegisterNetEvent('w_policejob:server:openStash', function()
+    local src = source
+    local Player = atStation(src, 'stash')
+    if not Player then return end
+    openLocker(src, 'policestash_' .. tostring(Player.PlayerData.citizenid), locale('info.personal_stash'), 70, 70000)
+end)
+
+RegisterNetEvent('w_policejob:server:openEvidence', function(office, drawer)
+    local src = source
+    office, drawer = tonumber(office), tonumber(drawer)
+    if not office or not drawer or drawer < 1 or drawer > 9999 then return end
+    drawer = math.floor(drawer) -- '2', never '2.0': the id is a DB key
+    local Player = atStation(src, 'evidence', office)
+    if not Player then return end
+    -- stash id, not a label: fixed so every language opens the same drawer
+    openLocker(src, ('%d | Drawer %d'):format(office, drawer), locale('info.evidence_drawer', drawer, office), 500, 4000000)
+end)
+
+--- The armory is a free shop of the bag: its job check (groups) and its grade per row
+--- (authorizedJobGrades) are the bag's, and it opens only within 10 m of an armory point.
+local function setupArmory()
+    if armoryReady then return true end
+    if GetResourceState('w_inventory') ~= 'started' then return false end
+    local shelf, points = {}, {}
+    for _, item in ipairs(Config.Items.items or {}) do
+        shelf[#shelf + 1] = { name = item.name, price = tonumber(item.price) or 0, grade = item.authorizedJobGrades }
+    end
+    for i, p in pairs(Config.Locations['armory'] or {}) do points[i] = vector3(p.x, p.y, p.z) end
+    local ok, err = pcall(function()
+        exports.w_inventory:RegisterShop(ARMORY_SHOP, {
+            name = locale(Config.Items.label),
+            groups = { police = 0 },
+            inventory = shelf,
+            locations = points,
+        })
+    end)
+    if not ok then
+        print(('^1[w_policejob] the armory could not be registered: %s^0'):format(tostring(err)))
+        return false
+    end
+    armoryReady = true
+    return true
+end
+
+RegisterNetEvent('w_policejob:server:openArmory', function()
+    local src = source
+    local Player, k = atStation(src, 'armory')
+    if not Player then return end
+    if not setupArmory() then return w.notify(src, { description = 'error.armory_down', type = 'error' }) end
+    TriggerClientEvent('w_inventory:openInventory', src, 'shop', { type = ARMORY_SHOP, id = k })
 end)
 
 -- ── evidence and police objects (audit 2026-10-18) ──────────────────────────────────────────

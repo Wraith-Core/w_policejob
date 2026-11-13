@@ -12,6 +12,7 @@
     "on_duty_police_only": "For on-duty lawmen only",
     "not_lawman": "You are not a lawman",
     "law_only": "Law enforcement only",
+    "armory_down": "The armory is not available right now",
     "have_evidence_bag": "You must have an empty evidence bag with you",
     "not_cuffed_dead": "Civilian isn't cuffed or dead",
     "record_failed": "Could not update the record of %s",

@@ -159,15 +159,6 @@ function RefreshPrompts()
     end
 end
 
----A fresh serial number for every armory firearm (rows whose info carries a `serie`).
-local function SetWeaponSeries()
-    for _, item in pairs(Config.Items.items) do
-        if item.type == 'weapon' and item.info and item.info.serie ~= nil then
-            item.info.serie = tostring(WCore.Shared.RandomInt(2) .. WCore.Shared.RandomStr(3) .. WCore.Shared.RandomInt(1) .. WCore.Shared.RandomStr(2) .. WCore.Shared.RandomInt(3) .. WCore.Shared.RandomStr(4))
-        end
-    end
-end
-
 RegisterNetEvent('police:client:promptVehicle', function(k)
     WCore.Functions.GetPlayerData(function(PlayerData)
         PlayerJob = PlayerData.job
@@ -223,14 +214,9 @@ RegisterNetEvent('police:client:EvidenceStashDrawer', function(k)
     })
     local drawer = input and tonumber(input[1])
     if drawer and drawer >= 1 then
-        drawer = math.floor(drawer) -- '2', never '2.0': the id is a DB key
-        -- stash id, not a label: fixed so every language opens the same drawer
-        local stashName = ('%d | Drawer %d'):format(currentEvidence, drawer)
-        TriggerServerEvent("inventory:server:OpenInventory", "stash", stashName, {
-            label = locale('info.evidence_drawer', drawer, currentEvidence),
-            maxweight = 4000000,
-            slots = 500,
-        })
+        -- 2026-11-13: the server opens the drawer (it checks the job and the office point);
+        -- the old QBCore event 'inventory:server:OpenInventory' was never answered on w_core
+        TriggerServerEvent('w_policejob:server:openEvidence', currentEvidence, math.floor(drawer))
     end
 end)
 
@@ -247,10 +233,7 @@ RegisterNetEvent('police:client:TakeOutVehicle', function(data)
 end)
 
 RegisterNetEvent('police:client:OpenPersonalStash', function()
-    local stashName = "policestash_" .. WCore.Functions.GetPlayerData().citizenid
-    TriggerServerEvent("inventory:server:OpenInventory", "stash", stashName, {
-        label = locale('info.personal_stash'),
-    })
+    TriggerServerEvent('w_policejob:server:openStash')
 end)
 
 RegisterNetEvent('police:client:OpenPersonalTrash', function()
@@ -261,30 +244,10 @@ RegisterNetEvent('police:client:OpenPersonalTrash', function()
     })
 end)
 
+-- The armory is a shop of the bag that the server registers (its rows, the grades and the job check
+-- are the server's; every firearm gets its serial number from the bag when it is taken)
 RegisterNetEvent('police:client:OpenArmory', function()
-    WCore.Functions.GetPlayerData(function(PlayerData)
-        if PlayerData.job.name == "police" then
-            local authorizedItems = {
-                label = locale('menu.pol_armory'),
-                slots = 30,
-                items = {}
-            }
-            local index = 1
-            for _, armoryItem in pairs(Config.Items.items) do
-                for i = 1, #armoryItem.authorizedJobGrades do
-                    if armoryItem.authorizedJobGrades[i] == PlayerData.job.grade.level then
-                        authorizedItems.items[index] = armoryItem
-                        authorizedItems.items[index].slot = index
-                        index = index + 1
-                    end
-                end
-            end
-            SetWeaponSeries()
-            TriggerServerEvent("inventory:server:OpenInventory", "shop", "police", authorizedItems)
-        else
-            WCore.Functions.Notify(locale('error.law_only'), 'error')
-        end
-    end)
+    TriggerServerEvent('w_policejob:server:openArmory')
 end)
 
 -- Threads

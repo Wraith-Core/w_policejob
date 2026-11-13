@@ -102,9 +102,8 @@ local function SearchTarget(player)
         WCore.Functions.Notify(locale("error.none_nearby"), 'error')
         return
     end
-    local playerId = GetPlayerServerId(player)
-    TriggerServerEvent("inventory:server:OpenInventory", "otherplayer", playerId)
-    TriggerServerEvent("police:server:SearchPlayer", playerId)
+    -- the server opens his bag after its own checks (on duty, within reach)
+    TriggerServerEvent("police:server:SearchPlayer", GetPlayerServerId(player))
 end
 
 ---@param player integer?
@@ -136,7 +135,7 @@ local function RobTarget(player, playerPed)
         disableCombat = true,
     }, {}, {}, {}, function() -- Done
         if #(GetEntityCoords(cache.ped) - GetEntityCoords(playerPed)) <= 1.8 then -- w_inventory opens another's bag within 1.8 m
-            TriggerServerEvent("inventory:server:OpenInventory", "otherplayer", playerId)
+            -- the server takes the cash and opens his bag (RobPlayer)
             TriggerServerEvent("police:server:RobPlayer", playerId)
         else
             WCore.Functions.Notify(locale("error.none_nearby"), 'error')
