@@ -1,36 +1,12 @@
--- Variables
-local isEscorting = false
-local isCarried = false   -- this player is on another's shoulder (police:client:GetKidnappedTarget)
+local carriedPatient
+local lastCarrierSession = 0
+local function yes(value) return value == true or value == 1 end
 
--- The game's own carry of a living (injured) person, read from data/ai/carryconfigdata.meta
--- INJURED_CARRIABLE_HUMAN_PED_CARRIED_BY_HUMAN_DATA_SET (CodeX, 2026-11-12): attached to the carrier's
--- ID_PH_L_CARRIABLE_SHOULDER with no offset and no rotation; the carried one holds
--- clipset@mech_carry_ped@injured@carried@human (dictionary mech_carry_ped@injured@carried@human, a standalone
--- .ycd: carriedbyhuman_exp 4.4 s), the carrier's left arm grips him with GRIP_LT_ARM of the same set (an arm-only
--- clip). The same recipe carries sheep / goats / pigs in w_farming/livestock/client/carry.lua.
-local CARRY <const> = {
-    dict = 'mech_carry_ped@injured@carried@human',
-    carried = 'carriedbyhuman_exp',
-    grip = 'grip_lt_arm',
-    bone = 'PH_L_CarriableShoulder',
-}
-
-local function LoadCarryDict()
-    if HasAnimDictLoaded(CARRY.dict) then return true end
-    RequestAnimDict(CARRY.dict)
-    local untilAt = GetGameTimer() + 3000
-    while not HasAnimDictLoaded(CARRY.dict) and GetGameTimer() < untilAt do Wait(10) end
-    return HasAnimDictLoaded(CARRY.dict)
-end
-
-local function PlayCarried(ped)
-    -- 1 = loop, full body
-    TaskPlayAnim(ped, CARRY.dict, CARRY.carried, 8.0, -8.0, -1, 1, 0.0, false, false, false)
-end
-
-local function PlayGrip(ped)
-    -- 31 = loop + upper body + secondary: the carrier walks as he likes, his left arm keeps hold
-    TaskPlayAnim(ped, CARRY.dict, CARRY.grip, 4.0, -4.0, -1, 31, 0.0, false, false, false)
+-- The server releases this exact pair, even when the patient is no longer the closest player.
+local function requestPutDown()
+    if not carriedPatient then return false end
+    TriggerServerEvent(PoliceCarryEvents.release, carriedPatient.session)
+    return true
 end
 -- cuffType (client/main.lua) states
 CUFF_NONE = 'none'
@@ -218,12 +194,13 @@ end
 ---@param player integer?
 ---@param playerPed integer?
 local function CarryTarget(player, playerPed)
+    if requestPutDown() then return end
     if not player then
         WCore.Functions.Notify(locale("error.none_nearby"), 'error')
         return
     end
-    if isHandcuffed or isEscorted or IsPedInAnyVehicle(playerPed, false) then return end
-    TriggerServerEvent("police:server:KidnapPlayer", GetPlayerServerId(player))
+    if isHandcuffed or isEscorted or yes(IsPedInAnyVehicle(playerPed, false)) then return end
+    TriggerServerEvent(PoliceCarryEvents.begin, GetPlayerServerId(player))
 end
 
 -- ── the card on the closest player ───────────────────────────────────────────────────
@@ -271,15 +248,15 @@ local function TargetState(t)
     return {
         cuffed = state.isHandcuffed == true,
         escorted = state.isEscorted == true,
-        down = IsEntityDead(t.ped) or state.isDead == true,
+        down = yes(IsEntityDead(t.ped)) or state.isDead == true,
         handsUp = HasHandsUp(t.ped),
-        inWagon = IsPedInAnyVehicle(t.ped, false),
+        inWagon = yes(IsPedInAnyVehicle(t.ped, false)),
     }
 end
 
 ---The player himself must be free to act, with nothing else owning the screen.
 local function CanAct()
-    if isHandcuffed or isEscorted or IsEntityDead(cache.ped) or IsPedRagdoll(cache.ped) then return false end
+    if isHandcuffed or isEscorted or yes(IsEntityDead(cache.ped)) or yes(IsPedRagdoll(cache.ped)) then return false end
     return ScreenIsFree()
 end
 
@@ -385,6 +362,9 @@ end
 
 ---Language switch (client/main.lua): relabel the card that is up.
 function RefreshPlayerPrompt()
+    if carriedPatient and carriedPatient.card then
+        carriedPatient.card.setLabel(Config.Keys.carry, locale('prompt.put_down'))
+    end
     if not Target then return end
     local t = Target
     if t.lawman then t.rec.setTitle(locale('prompt.suspect')) end
@@ -420,10 +400,67 @@ local function WantsPlayerCard()
     return LocalPlayer.state.isLoggedIn and PlayerJob.name ~= 'doctor'
 end
 
+local function stopGrip(ped)
+    if ped and yes(DoesEntityExist(ped)) and yes(IsEntityPlayingAnim(ped, PoliceCarryFoot.dict, PoliceCarryFoot.grip, 3)) then
+        StopAnimTask(ped, PoliceCarryFoot.dict, PoliceCarryFoot.grip, 4.0)
+    end
+end
+
+local function clearCarrier()
+    local active = carriedPatient
+    if not active then return end
+    carriedPatient = nil
+    if active.card then active.card.remove() end
+    stopGrip(active.ped)
+    SetPersonCard(false)
+    TriggerEvent('hospital:client:SetEscortingState', false)
+end
+
+local function cancelCarrier()
+    if not carriedPatient then return end
+    TriggerServerEvent(PoliceCarryEvents.release, carriedPatient.session, false)
+    clearCarrier()
+end
+
+local function refreshCarrier()
+    local active, ped = carriedPatient, PlayerPedId()
+    if ped == 0 or not yes(DoesEntityExist(ped)) or yes(IsEntityDead(ped)) or isHandcuffed or isEscorted
+        or (active.ped and active.ped ~= ped) then
+        cancelCarrier()
+        return
+    end
+    if not active.card then
+        active.ped = ped
+        active.card = TrackCard(w.prompt.atEntity(ped, {
+            distance = TARGET_REACH, title = false, canInteract = ScreenIsFree,
+            onEnter = function() SetPersonCard(true) end,
+            onExit = function() SetPersonCard(false) end,
+            prompts = {{ key = Config.Keys.carry, label = locale('prompt.put_down'), onComplete = function()
+                if carriedPatient == active then requestPutDown() end
+            end }},
+        }), CARD_CARRY)
+    end
+    -- Keep the shoulder grip on foot. Mounting, riding and dismounting have their own tasks.
+    if yes(IsPedOnMount(ped)) then
+        stopGrip(ped)
+        return
+    end
+    local index = GetPlayerFromServerId(active.peer)
+    if not index or index < 0 or not yes(NetworkIsPlayerActive(index)) then return end
+    local patient = GetPlayerPed(index)
+    if patient ~= 0 and yes(DoesEntityExist(patient)) and yes(IsEntityAttachedToEntity(patient, ped))
+        and yes(HasAnimDictLoaded(PoliceCarryFoot.dict))
+        and not yes(IsEntityPlayingAnim(ped, PoliceCarryFoot.dict, PoliceCarryFoot.grip, 3)) then
+        TaskPlayAnim(ped, PoliceCarryFoot.dict, PoliceCarryFoot.grip, 4.0, -4.0, -1, 31, 0.0, false, false, false)
+    end
+end
+
 CreateThread(function()
     while true do
         Wait(250)
-        if WantsPlayerCard() then
+        if carriedPatient then
+            refreshCarrier()
+        elseif WantsPlayerCard() then
             local lawman = PlayerJob.name == 'police' and onDuty == true
             local id, ped = NearestPlayer(TARGET_SCAN)
             if Target and (Target.ped ~= ped or Target.lawman ~= lawman) then
@@ -458,7 +495,7 @@ RegisterNetEvent('police:client:PutInVehicle', function()
         if vehicle and DoesEntityExist(vehicle) then
             for i = GetVehicleMaxNumberOfPassengers(vehicle) - 1, 0, -1 do
                 if IsVehicleSeatFree(vehicle, i) then
-                    isCarried = false
+                    PoliceCarryTarget.cancel()
                     SetEscorted(false)
                     TriggerEvent('hospital:client:isEscorted', isEscorted)
                     ClearPedTasks(ped)
@@ -515,11 +552,11 @@ RegisterNetEvent('police:client:SetPlayerOutVehicle', function()
 end)
 
 RegisterNetEvent('police:client:EscortPlayer', function()
-    EscortTarget(NearestPlayer(2.5))
+    if not requestPutDown() then EscortTarget(NearestPlayer(2.5)) end
 end)
 
 RegisterNetEvent('police:client:KidnapPlayer', function()
-    CarryTarget(NearestPlayer(2.5))
+    if not requestPutDown() then CarryTarget(NearestPlayer(2.5)) end
 end)
 
 RegisterNetEvent('police:client:CuffPlayerSoft', function()
@@ -557,57 +594,34 @@ RegisterNetEvent('police:client:GetEscorted', function(playerId)
 end)
 
 RegisterNetEvent('police:client:DeEscort', function()
-    isCarried = false
+    PoliceCarryTarget.cancel()
     SetEscorted(false)
     TriggerEvent('hospital:client:isEscorted', isEscorted)
     DetachEntity(cache.ped, true, false)
 end)
 
-RegisterNetEvent('police:client:GetKidnappedTarget', function(playerId)
-    local ped = cache.ped
-    WCore.Functions.GetPlayerData(function(PlayerData)
-        if PlayerData.metadata["isdead"] or PlayerData.metadata["inlaststand"] or isHandcuffed then
-            if not isEscorted then
-                SetEscorted(true)
-                draggerId = playerId
-                local dragger = GetPlayerPed(GetPlayerFromServerId(playerId))
-                -- 2026-11-12: the game's shoulder carry (CARRY above) instead of a bare attach with no clip,
-                -- which hung the man upright at the carrier's waist. Without the clip / bone the old attach stays.
-                local bone = GetEntityBoneIndexByName(dragger, CARRY.bone)
-                if bone and bone >= 0 and LoadCarryDict() then
-                    isCarried = true
-                    ClearPedTasksImmediately(ped)
-                    SetEnableHandcuffs(ped, false, false) -- the cuffed arms pose would fight the carried clip
-                    AttachEntityToEntity(ped, dragger, bone, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false, false, false, false, 0, true, false, false)
-                    PlayCarried(ped)
-                else
-                    AttachEntityToEntity(ped, dragger, 0, 0.27, 0.15, 0.63, 0.5, 0.5, 0.0, false, false, false, false, 2, false)
-                end
-            else
-                SetEscorted(false)
-                isCarried = false
-                DetachEntity(ped, true, false)
-                ClearPedTasksImmediately(ped)
-            end
-            TriggerEvent('hospital:client:isEscorted', isEscorted)
-        end
-    end)
+RegisterNetEvent(PoliceCarryEvents.target, function(peer, active, session, placeAtCarrier)
+    if active == true then
+        PoliceCarryTarget.start(peer, session)
+    elseif active == false then
+        PoliceCarryTarget.stop(peer, session, placeAtCarrier)
+    end
 end)
 
-RegisterNetEvent('police:client:GetKidnappedDragger', function(playerId)
-    WCore.Functions.GetPlayerData(function()
-        if not isEscorting then
-            draggerId = playerId
-            isEscorting = true
-            if LoadCarryDict() then PlayGrip(cache.ped) end
-        else
-            local dragger = cache.ped
-            ClearPedSecondaryTask(dragger)
-            ClearPedTasksImmediately(dragger)
-            isEscorting = false
-        end
-        TriggerEvent('hospital:client:SetEscortingState', isEscorting)
-    end)
+RegisterNetEvent(PoliceCarryEvents.carrier, function(peer, active, session)
+    if type(session) ~= 'number' or session < lastCarrierSession then return end
+    if active == true and session > lastCarrierSession then
+        clearCarrier()
+        DropTarget()
+        lastCarrierSession = session
+        carriedPatient = { peer = peer, session = session }
+        RequestAnimDict(PoliceCarryFoot.dict)
+        TriggerEvent('hospital:client:SetEscortingState', true)
+        refreshCarrier()
+    elseif active == false then
+        lastCarrierSession = session
+        if carriedPatient and carriedPatient.session == session and carriedPatient.peer == peer then clearCarrier() end
+    end
 end)
 
 RegisterNetEvent('police:client:GetCuffed', function(playerId, isSoftcuff, wanted)
@@ -633,7 +647,7 @@ RegisterNetEvent('police:client:GetCuffed', function(playerId, isSoftcuff, wante
         end
     else
         SetHandcuffed(false)
-        isCarried = false
+        PoliceCarryTarget.cancel()
         SetEscorted(false)
         TriggerEvent('hospital:client:isEscorted', isEscorted)
         DetachEntity(ped, true, false)
@@ -681,19 +695,7 @@ CreateThread(function()
             DisableControlAction(0, 0xE30CD707, true) -- R
         end
 
-        if isCarried and not isEscorted then isCarried = false end
-        if isCarried then
-            if not IsEntityPlayingAnim(ped, CARRY.dict, CARRY.carried, 3) and HasAnimDictLoaded(CARRY.dict) then
-                PlayCarried(ped)
-            end
-        end
-        if isEscorting and HasAnimDictLoaded(CARRY.dict)
-            and not IsEntityPlayingAnim(ped, CARRY.dict, CARRY.grip, 3) and draggerId
-            and IsEntityAttachedToEntity(GetPlayerPed(GetPlayerFromServerId(draggerId)), ped) then
-            PlayGrip(ped)
-        end
-
-        if isHandcuffed and cuffType ~= CUFF_NONE and not isCarried then
+        if isHandcuffed and cuffType ~= CUFF_NONE and not PoliceCarryTarget.active() then
             SetEnableHandcuffs(ped, true, false)
             DisablePlayerFiring(cache.playerId, true)
             SetPedCanPlayGestureAnims(ped, false)
@@ -711,5 +713,17 @@ CreateThread(function()
     end
 end)
 
--- The resource stops: the card following the closest player goes with it.
-w.stopped(DropTarget)
+-- Medical and character transitions own the new position. Cancel without moving the patient.
+RegisterNetEvent('hospital:client:Revive', PoliceCarryTarget.cancel)
+RegisterNetEvent('hospital:client:SendToBed', PoliceCarryTarget.cancel)
+AddEventHandler('w_creators:client:resurrected', PoliceCarryTarget.cancel)
+AddEventHandler('police:client:SendToJail', PoliceCarryTarget.cancel)
+AddEventHandler('WCore:Client:OnPlayerUnload', function()
+    PoliceCarryTarget.cancel()
+    cancelCarrier()
+end)
+
+w.stopped(function()
+    DropTarget()
+    clearCarrier()
+end)

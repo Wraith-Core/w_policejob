@@ -123,7 +123,8 @@
     "seize_cash": "Seize cash",
     "check_status": "Check condition",
     "rob": "Rob",
-    "carry": "Carry"
+    "carry": "Carry",
+    "put_down": "Put down"
   },
   "blip": {
     "sheriff": "Sheriff",

@@ -17,6 +17,23 @@ local Casings = {}
 local BloodDrops = {}
 local FingerDrops = {}
 local Objects = {}
+local carryByPlayer = {}
+local nextCarryId = 0
+
+local function notifyCarry(pair, active, placeAtCarrier)
+    TriggerClientEvent(PoliceCarryEvents.target, pair.patient, pair.carrier, active, pair.id, placeAtCarrier)
+    TriggerClientEvent(PoliceCarryEvents.carrier, pair.carrier, pair.patient, active, pair.id)
+end
+
+-- Either participant can end their own carry. A delayed cleanup for an older session is harmless.
+local function releaseCarry(src, sessionId, placeAtCarrier)
+    local pair = carryByPlayer[tonumber(src)]
+    if not pair or (sessionId ~= nil and sessionId ~= pair.id) then return end
+    carryByPlayer[pair.carrier] = nil
+    carryByPlayer[pair.patient] = nil
+    local place = placeAtCarrier == true and GetPlayerRoutingBucket(pair.carrier) == GetPlayerRoutingBucket(pair.patient)
+    notifyCarry(pair, false, place)
+end
 
 -- Functions
 local function UpdateBlips()
@@ -180,6 +197,7 @@ local function jailInPlay(src, OtherPlayer, time)
     OtherPlayer.Functions.SetMetaData("criminalrecord", jailRecord())
     -- his client drops the cuffs on SendToJail; the server clears its own flag (see SetHandcuffStatus)
     OtherPlayer.Functions.SetMetaData("ishandcuffed", false)
+    releaseCarry(OtherPlayer.PlayerData.source)
     TriggerClientEvent("police:client:SendToJail", OtherPlayer.PlayerData.source, time)
     TriggerClientEvent('police:client:notify', src, 'info.sent_jail_for', 'inform', time)
     -- 1.0.2: the level (w_level's table): the officer for the arrest (the same man counts once in a while),
@@ -679,6 +697,7 @@ RegisterNetEvent('police:server:CuffPlayer', function(playerId, isSoftcuff)
     -- own, so the two can never drift apart (a toggle on a stale flag inverted it for good)
     local wanted = not ((CuffedPlayer.PlayerData.metadata or {}).ishandcuffed == true)
     grantCuffAnswer(CuffedPlayer.PlayerData.source, wanted)
+    if not wanted then releaseCarry(CuffedPlayer.PlayerData.source) end
     TriggerClientEvent("police:client:GetCuffed", CuffedPlayer.PlayerData.source, src, soft, wanted)
 end)
 
@@ -689,23 +708,35 @@ RegisterNetEvent('police:server:EscortPlayer', function(playerId)
     local Player, EscortPlayer = nearTarget(src, playerId, 'EscortPlayer')
     if not Player then return end
     if onDutyAs(Player, 'police', 'doctor') or isHelpless(EscortPlayer) then
-        TriggerClientEvent("police:client:GetEscorted", EscortPlayer.PlayerData.source, src)
+        local target = EscortPlayer.PlayerData.source
+        if carryByPlayer[src] and carryByPlayer[src].patient ~= target then return end
+        if carryByPlayer[target] and carryByPlayer[target].carrier ~= src then return end
+        releaseCarry(target)
+        TriggerClientEvent("police:client:GetEscorted", target, src)
     else
         w.notify(src, { description = 'error.not_cuffed_dead', type = 'error' })
     end
 end)
 
--- Carry on the shoulder / put down: anybody, a cuffed, dead or downed man only.
-RegisterNetEvent('police:server:KidnapPlayer', function(playerId)
+-- Picking someone up requires a fresh proximity check. Putting them down only needs the session.
+RegisterNetEvent(PoliceCarryEvents.begin, function(playerId)
     local src = source
     local Player, EscortPlayer = nearTarget(src, playerId, 'KidnapPlayer')
     if not Player then return end
-    if isHelpless(EscortPlayer) then
-        TriggerClientEvent("police:client:GetKidnappedTarget", EscortPlayer.PlayerData.source, src)
-        TriggerClientEvent("police:client:GetKidnappedDragger", src, EscortPlayer.PlayerData.source)
-    else
-        w.notify(src, { description = 'error.not_cuffed_dead', type = 'error' })
+    if isHelpless(Player) then return end
+    if not isHelpless(EscortPlayer) then
+        return w.notify(src, { description = 'error.not_cuffed_dead', type = 'error' })
     end
+    local target = EscortPlayer.PlayerData.source
+    if carryByPlayer[src] or carryByPlayer[target] then return end
+    nextCarryId = nextCarryId + 1
+    local pair = { id = nextCarryId, carrier = src, patient = target }
+    carryByPlayer[src], carryByPlayer[target] = pair, pair
+    notifyCarry(pair, true)
+end)
+
+RegisterNetEvent(PoliceCarryEvents.release, function(sessionId, placeAtCarrier)
+    releaseCarry(source, sessionId, placeAtCarrier == nil or placeAtCarrier == true)
 end)
 
 -- Wagons: the lawman card only (on duty), a cuffed or dead man only.
@@ -883,11 +914,13 @@ end)
 AddEventHandler('WCore:Server:OnPlayerUnload', function(src)
     src = tonumber(src)
     if not src then return end
+    releaseCarry(src)
     cuffGrants[src] = nil
     clearCuffFlag(src)
 end)
 
 AddEventHandler('playerDropped', function()
+    releaseCarry(source)
     cuffGrants[source] = nil
 end)
 

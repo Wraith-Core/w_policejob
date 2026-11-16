@@ -11,6 +11,7 @@
     others are suspended for as long as they overlap it.
 ]]
 
+CARD_CARRY = 4       -- put down the person already being carried
 CARD_STATION = 3     -- station points (duty, garage, stash, armory, evidence drawer)
 CARD_EVIDENCE = 2    -- evidence lying on the ground
 CARD_PLAYER = 1      -- the card that follows the closest player
