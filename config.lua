@@ -210,4 +210,151 @@ Config.Robbery = { share = 0.5, max = 500, cooldownMinutes = 30 }
 
 ---------------------------------------------
 
-WCore = w.framework:getCoreObject()
+local function normalizeItemSlot(row)
+    if type(row) ~= 'table' then return nil end
+    if row.info == nil and type(row.metadata) == 'table' then
+        row.info = row.metadata
+    end
+    return row
+end
+
+WCore = {
+    Shared = {
+        GetWeapons = function()
+            return exports.w_lib:FwGetSharedWeapons() or {}
+        end,
+        GetItem = function(name)
+            return exports.w_lib:FwGetSharedItem(name)
+        end,
+    },
+    Functions = {},
+    Commands = {},
+}
+
+if IsDuplicityVersion() then
+    local function wrapPlayer(pd, isOffline)
+        if type(pd) ~= 'table' or (not pd.citizenid and not pd.source) then return nil end
+        local src = pd.source
+        local cid = pd.citizenid
+        return {
+            PlayerData = pd,
+            Functions = {
+                SetMetaData = function(key, val)
+                    pd.metadata = pd.metadata or {}
+                    pd.metadata[key] = val
+                    if isOffline or not src then
+                        return exports.w_lib:FwSetOfflineMetadata(cid, { [key] = val })
+                    end
+                    return exports.w_lib:FwSetMetadata(src, key, val)
+                end,
+                AddItem = function(item, amount, _slot, info)
+                    if isOffline or not src then return false end
+                    return exports.w_lib:InvAddItem(src, item, amount or 1, info)
+                end,
+                RemoveItem = function(item, amount, slot)
+                    if isOffline or not src then return false end
+                    return exports.w_lib:InvRemoveItem(src, item, amount or 1, nil, slot)
+                end,
+                GetItemByName = function(item)
+                    if isOffline or not src then return nil end
+                    return normalizeItemSlot(exports.w_lib:InvGetSlotWithItem(src, item))
+                end,
+                GetItemBySlot = function(slot)
+                    if isOffline or not src then return nil end
+                    return normalizeItemSlot(exports.w_lib:InvGetSlot(src, slot))
+                end,
+                Save = function()
+                    if isOffline or not src then return true end
+                    return exports.w_lib:FwSavePlayer(src)
+                end,
+            },
+        }
+    end
+
+    WCore.Functions.GetPlayer = function(src)
+        return wrapPlayer(exports.w_lib:FwGetPlayerData(src), false)
+    end
+    WCore.Functions.GetWPlayers = function()
+        local out = {}
+        for src, pd in pairs(exports.w_lib:FwGetOnlinePlayers() or {}) do
+            local wrapped = wrapPlayer(pd, false)
+            if wrapped then out[src] = wrapped end
+        end
+        return out
+    end
+    WCore.Functions.GetOfflinePlayerByCitizenId = function(cid)
+        return wrapPlayer(exports.w_lib:FwGetOfflinePlayer(cid), true)
+    end
+    WCore.Functions.CreateCallback = function(name, cb)
+        w.callback.register(name, function(src, ...)
+            local p = promise.new()
+            cb(src, function(...)
+                p:resolve(table.pack(...))
+            end, ...)
+            local res = Citizen.Await(p)
+            return table.unpack(res, 1, res.n)
+        end)
+    end
+    WCore.Functions.CreateUseableItem = function(item, cb)
+        exports.w_lib:InvRegisterUsableItem(item, false, function(src, data)
+            local norm = type(data) == 'table' and normalizeItemSlot(data) or { name = item }
+            cb(src, norm)
+        end)
+    end
+    WCore.Commands.Add = function(name, help, params, argsRequired, cb, perm)
+        return exports.w_lib:FwAddCommand(name, help, params, argsRequired, cb, perm)
+    end
+else
+    WCore.Functions.GetPlayerData = function(cb)
+        local pd = exports.w_lib:FwGetPlayerData() or {}
+        if type(cb) == 'function' then cb(pd) end
+        return pd
+    end
+    WCore.Functions.HasItem = function(item, amount)
+        return exports.w_lib:InvHasItem(item, amount or 1)
+    end
+    WCore.Functions.Notify = function(msg, kind, duration)
+        if type(msg) == 'table' then
+            w.notify({ title = msg.text, description = msg.caption, type = kind or 'inform', duration = duration })
+        else
+            w.notify({ description = tostring(msg or ''), type = kind or 'inform', duration = duration })
+        end
+    end
+    WCore.Functions.Progressbar = function(_name, label, duration, useWhileDead, canCancel, disableControls, animation, _prop, _propTwo, onFinish, onCancel)
+        CreateThread(function()
+            local disable = type(disableControls) == 'table' and {
+                move = disableControls.disableMovement == true,
+                car = disableControls.disableVehicleMovement == true,
+                mouse = disableControls.disableMouse == true,
+                combat = disableControls.disableCombat == true,
+            } or nil
+            local anim = (type(animation) == 'table' and animation.animDict and animation.anim) and {
+                dict = animation.animDict,
+                clip = animation.anim,
+                flag = animation.flags,
+            } or nil
+            local done = w.progressBar({
+                duration = tonumber(duration) or 1000,
+                label = label or '',
+                useWhileDead = useWhileDead == true,
+                canCancel = canCancel ~= false,
+                disable = disable,
+                anim = anim,
+            })
+            if done then
+                if type(onFinish) == 'function' then onFinish() end
+            else
+                if type(onCancel) == 'function' then onCancel() end
+            end
+        end)
+    end
+    WCore.Functions.TriggerCallback = function(name, cb, ...)
+        local args = table.pack(...)
+        CreateThread(function()
+            local res = table.pack(w.callback.await(name, false, table.unpack(args, 1, args.n)))
+            if type(cb) == 'function' then
+                cb(table.unpack(res, 1, res.n))
+            end
+        end)
+    end
+end

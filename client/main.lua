@@ -68,14 +68,13 @@ if LocalPlayer.state.isLoggedIn then
 end
 
 -- Events
-AddEventHandler('WCore:Client:OnPlayerLoaded', function()
+exports.w_lib:FwOnCharacterLoaded(function()
     local player = WCore.Functions.GetPlayerData() or {}
     PlayerJob = player.job or {}
     onDuty = PlayerJob.onduty or false
     SetHandcuffed(false)
     SetEscorted(false)
-    -- the server clears its own cuff flag when the character loads (server/main.lua); w_core no
-    -- longer takes a client's word on it (WCore:Server:SetMetaData), and this report is a no-op
+    -- the server clears its own cuff flag when the character loads (server/main.lua)
     TriggerServerEvent("police:server:SetHandcuffStatus", false)
     TriggerServerEvent("police:server:UpdateCurrentCops")
 
@@ -88,7 +87,7 @@ AddEventHandler('WCore:Client:OnPlayerLoaded', function()
     end
 end)
 
-RegisterNetEvent('WCore:Client:OnPlayerUnload', function()
+exports.w_lib:FwOnCharacterUnloaded(function()
     TriggerServerEvent("police:server:SetHandcuffStatus", false)
     TriggerServerEvent("police:server:UpdateCurrentCops")
     SetHandcuffed(false)
@@ -100,7 +99,8 @@ RegisterNetEvent('WCore:Client:OnPlayerUnload', function()
     RemovePrompts()
 end)
 
-RegisterNetEvent('WCore:Client:OnJobUpdate', function(JobInfo)
+exports.w_lib:FwOnJobUpdate(function(JobInfo)
+    JobInfo = JobInfo or {}
     local becomesLawman = JobInfo.name == "police" and PlayerJob.name ~= "police"
     if becomesLawman then
         CreatePrompts()
@@ -112,17 +112,15 @@ RegisterNetEvent('WCore:Client:OnJobUpdate', function(JobInfo)
     end
     PlayerJob = JobInfo
     onDuty = JobInfo.onduty == true
-    -- a new lawman starts off duty (he signs in at the station). 2026-11-12: this used to set onDuty = false
-    -- BEFORE the line above put it back to true, so the client said on duty while the server was off, and every
-    -- station toggle after that was inverted. The server's answer (WCore:Client:SetDuty) sets it now.
+    -- a new lawman starts off duty (he signs in at the station).
     if becomesLawman and onDuty then
         onDuty = false
-        TriggerServerEvent("WCore:ToggleDuty")
+        exports.w_lib:FwToggleDuty()
     end
 end)
 
--- The server's duty (w_core server/events.lua, after WCore:ToggleDuty): the one source of onDuty.
-RegisterNetEvent('WCore:Client:SetDuty', function(duty)
+-- The server's duty: the one source of onDuty.
+exports.w_lib:FwOnDutyChange(function(duty)
     onDuty = duty == true
     if PlayerJob then PlayerJob.onduty = onDuty end
     TriggerServerEvent("police:server:UpdateCurrentCops")

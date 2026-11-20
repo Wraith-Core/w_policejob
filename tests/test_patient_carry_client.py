@@ -82,7 +82,15 @@ function Wait(ms) now = now + math.max(ms, 1) end
 function RegisterNetEvent(name, fn) events[name] = fn end
 AddEventHandler = RegisterNetEvent
 function TriggerServerEvent(name, ...) table.insert(serverCalls, {name, ...}) end
-TriggerEvent, exports, CreateThread = ignore, ignore, ignore
+TriggerEvent, CreateThread = ignore, ignore
+exports = setmetatable({ w_lib = {
+    FwOnCharacterLoaded = function(_, fn) RegisterNetEvent('WCore:Client:OnPlayerLoaded', fn) end,
+    FwOnCharacterUnloaded = function(_, fn) RegisterNetEvent('WCore:Client:OnPlayerUnload', fn) end,
+    FwOnJobUpdate = function(_, fn) RegisterNetEvent('WCore:Client:OnJobUpdate', fn) end,
+    FwOnDutyChange = function(_, fn) RegisterNetEvent('WCore:Client:SetDuty', fn) end,
+    FwToggleDuty = function() TriggerServerEvent('WCore:ToggleDuty') end,
+    InvOpenInventory = ignore,
+} }, { __call = ignore })
 function IsNuiFocused() return false end
 function SetEscorted(on) isEscorted = on end
 WCore = {Functions={GetPlayerData=function(cb)

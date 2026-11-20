@@ -23,6 +23,23 @@ function TriggerClientEvent(...) table.insert(events, table.pack(...)) end
 function locale(key) return key end
 function GetGameTimer() return 100 end
 CreateThread = noop
+exports = setmetatable({ w_lib = {
+    FwOnCharacterLoaded = function(_, fn) AddEventHandler('WCore:Server:PlayerLoaded', fn) end,
+    FwOnCharacterUnloaded = function(_, fn) AddEventHandler('WCore:Server:OnPlayerUnload', fn) end,
+    FwToggleDuty = noop,
+    EconName = function() return 'framework' end,
+    EconIsReady = function() return false end,
+    EconEnsureAccount = function() return false end,
+    EconTransfer = function() return false end,
+    InvRegisterShop = noop,
+    InvOpenInventory = noop,
+    InvAddItem = function() return true end,
+    InvRemoveItem = function() return true end,
+    InvGetItemCount = function() return 1 end,
+    InvRegisterUsableItem = noop,
+    FwAddCurrency = function() return true end,
+    FwRemoveCurrency = function() return true end,
+} }, { __call = noop })
 Config = {}
 w = {print={debug=noop}, notify=noop}
 players = {}

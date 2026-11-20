@@ -225,7 +225,7 @@ end)
 -- takes it). Flipping it here as well drifted the moment the two disagreed once (a job set while on duty, see
 -- OnJobUpdate): from then on the law card came up only while the station said off duty.
 RegisterNetEvent('w_policejob:ToggleDuty', function()
-    TriggerServerEvent("WCore:ToggleDuty")
+    exports.w_lib:FwToggleDuty()
 end)
 
 RegisterNetEvent('police:client:TakeOutVehicle', function(data)

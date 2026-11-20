@@ -1,5 +1,5 @@
 local function economyReady()
-    return GetResourceState('w_centralbank') == 'started' and exports.w_centralbank:IsReady()
+    return exports.w_lib:EconIsReady()
 end
 local function closePlayers(a, b)
     if not a or not b then return false end
@@ -390,10 +390,10 @@ WCore.Functions.CreateUseableItem("moneybag", function(source, item)
     if not bag or bag.name ~= 'moneybag' or type(id) ~= 'string' or not id:match('^moneybag:%x+:cash$') then
         return w.notify(source, { description = 'error.moneybag_empty', type = 'error' })
     end
-    local amount = exports.w_centralbank:GetBalance(id)
+    local amount = exports.w_lib:EconGetBalance(id)
     if not amount or amount <= 0 then return w.notify(source, { description = 'error.moneybag_empty', type = 'error' }) end
     if not player.Functions.RemoveItem('moneybag', 1, item.slot) then return end
-    if not exports.w_centralbank:Transfer(id, cashAccount(player), amount, 'moneybag-redeemed', 'redeem:' .. id) then
+    if not exports.w_lib:EconTransfer(id, cashAccount(player), amount, 'moneybag-redeemed', 'redeem:' .. id) then
         player.Functions.AddItem('moneybag', 1, item.slot, info)
         return w.notify(source, { description = 'error.economy_down', type = 'error' })
     end
@@ -819,10 +819,10 @@ RegisterNetEvent('police:server:BillPlayer', function(playerId, price, reason)
     if wait > 0 then
         return TriggerClientEvent('police:client:notify', src, 'error.fine_cooldown', 'error', wait)
     end
-    if not economyReady() or not exports.w_centralbank:EnsureAccount('society:police', 'police', 'society') then
+    if not economyReady() or not exports.w_lib:EconEnsureAccount('society:police', 'police', 'society') then
         return w.notify(src, { description = 'error.economy_down', type = 'error' })
     end
-    if not exports.w_centralbank:Transfer('player:' .. OtherPlayer.PlayerData.citizenid .. ':bank', 'society:police', price, 'police-bill') then
+    if not exports.w_lib:EconTransfer('player:' .. OtherPlayer.PlayerData.citizenid .. ':bank', 'society:police', price, 'police-bill') then
         return w.notify(src, { description = 'error.fine_no_money', type = 'error' })
     end
     lastFine[pair] = os.time()
@@ -904,14 +904,14 @@ end
 
 -- A character loading or logging out comes free of the cuffs (client/main.lua drops them on his
 -- client), as before; the flag is cleared here now instead of on his client's word.
-AddEventHandler('WCore:Server:PlayerLoaded', function(Player)
-    local src = Player and Player.PlayerData and tonumber(Player.PlayerData.source)
+exports.w_lib:FwOnCharacterLoaded(function(src)
+    src = tonumber(src)
     if not src then return end
     cuffGrants[src] = nil
     clearCuffFlag(src)
 end)
 
-AddEventHandler('WCore:Server:OnPlayerUnload', function(src)
+exports.w_lib:FwOnCharacterUnloaded(function(src)
     src = tonumber(src)
     if not src then return end
     releaseCarry(src)
@@ -975,8 +975,7 @@ end)
 ---@param src integer
 ---@param target integer
 local function openBagOf(src, target)
-    if GetResourceState('w_inventory') ~= 'started' then return end
-    TriggerClientEvent('w_inventory:openInventory', src, 'player', target)
+    exports.w_lib:InvOpenInventory(src, 'player', target)
 end
 
 -- The lawman card's search (on duty): the cash he finds, and the man is told he is searched.
@@ -1000,16 +999,16 @@ RegisterNetEvent('police:server:SeizeCash', function(playerId)
         return refuseAct(src, 'SeizeCash', 'not a lawman on duty', 'error.on_duty_police_only')
     end
     if not economyReady() then return w.notify(src, { description = 'error.economy_down', type = 'error' }) end
-    local amount = exports.w_centralbank:GetBalance(cashAccount(victim))
+    local amount = exports.w_lib:EconGetBalance(cashAccount(victim))
     if not amount or amount <= 0 then return w.notify(src, { description = 'error.seize_no_cash', type = 'error' }) end
     local token = ('%08x%08x%08x%08x'):format(math.random(0,0x7fffffff),math.random(0,0x7fffffff),math.random(0,0x7fffffff),math.random(0,0x7fffffff))
     local claim = 'moneybag:' .. token .. ':cash'
-    if not exports.w_centralbank:EnsureAccount(claim, officer.PlayerData.citizenid, 'bearer-cash')
-        or not exports.w_centralbank:Transfer(cashAccount(victim), claim, amount, 'police-cash-seized') then
+    if not exports.w_lib:EconEnsureAccount(claim, officer.PlayerData.citizenid, 'bearer-cash')
+        or not exports.w_lib:EconTransfer(cashAccount(victim), claim, amount, 'police-cash-seized') then
         return w.notify(src, { description = 'error.economy_down', type = 'error' })
     end
     if not officer.Functions.AddItem('moneybag', 1, false, {cash=amount, economyClaim=claim}) then
-        exports.w_centralbank:Transfer(claim, cashAccount(victim), amount, 'seizure-cancelled')
+        exports.w_lib:EconTransfer(claim, cashAccount(victim), amount, 'seizure-cancelled')
         return w.notify(src, { description = 'error.seize_no_room', type = 'error' })
     end
     w.notify(victim.PlayerData.source, {description='info.cash_confiscated', type='inform'})
@@ -1038,13 +1037,13 @@ RegisterNetEvent('police:server:RobPlayer', function(playerId)
     if wait > 0 then
         return TriggerClientEvent('police:client:notify', src, 'error.rob_cooldown', 'error', wait)
     end
-    local balance = exports.w_centralbank:GetBalance(cashAccount(victim))
+    local balance = exports.w_lib:EconGetBalance(cashAccount(victim))
     if not balance or balance <= 0 then return w.notify(src, { description = 'error.rob_no_cash', type = 'error' }) end
     local share = math.min(math.max(tonumber(cfg.share) or 0.5, 0), 1)
     -- whole cents (the central bank keeps cents), never above the cap
     local amount = math.min(math.floor(balance * share * 100) / 100, tonumber(cfg.max) or 500)
     if amount <= 0 then return w.notify(src, { description = 'error.rob_no_cash', type = 'error' }) end
-    if not exports.w_centralbank:Transfer(cashAccount(victim), cashAccount(robber), amount, 'player-robbery') then
+    if not exports.w_lib:EconTransfer(cashAccount(victim), cashAccount(robber), amount, 'player-robbery') then
         return w.notify(src, { description = 'error.rob_no_cash', type = 'error' })
     end
     lastRobbery[pair] = os.time()
@@ -1126,21 +1125,21 @@ end)
 --- (authorizedJobGrades) are the bag's, and it opens only within 10 m of an armory point.
 local function setupArmory()
     if armoryReady then return true end
-    if GetResourceState('w_inventory') ~= 'started' then return false end
+    if not exports.w_lib:InvReady() then return false end
     local shelf, points = {}, {}
     for _, item in ipairs(Config.Items.items or {}) do
         shelf[#shelf + 1] = { name = item.name, price = tonumber(item.price) or 0, grade = item.authorizedJobGrades }
     end
     for i, p in pairs(Config.Locations['armory'] or {}) do points[i] = vector3(p.x, p.y, p.z) end
     local ok, err = pcall(function()
-        exports.w_inventory:RegisterShop(ARMORY_SHOP, {
+        return exports.w_lib:InvRegisterShop(ARMORY_SHOP, {
             name = locale(Config.Items.label),
             groups = { police = 0 },
             inventory = shelf,
             locations = points,
         })
     end)
-    if not ok then
+    if not ok or err == false then
         print(('^1[w_policejob] the armory could not be registered: %s^0'):format(tostring(err)))
         return false
     end
@@ -1153,7 +1152,7 @@ RegisterNetEvent('w_policejob:server:openArmory', function()
     local Player, k = atStation(src, 'armory')
     if not Player then return end
     if not setupArmory() then return w.notify(src, { description = 'error.armory_down', type = 'error' }) end
-    TriggerClientEvent('w_inventory:openInventory', src, 'shop', { type = ARMORY_SHOP, id = k })
+    exports.w_lib:InvOpenInventory(src, 'shop', { type = ARMORY_SHOP, id = k })
 end)
 
 -- ── evidence and police objects (audit 2026-10-18) ──────────────────────────────────────────
